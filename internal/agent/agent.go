@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"strings"
@@ -279,6 +280,22 @@ Do not answer with only a markdown plan or shell snippets.`,
 			return nil
 		}
 
+		// Sanitize tool_calls before history so Ollama doesn't 400 on next round.
+		for i := range msg.ToolCalls {
+			msg.ToolCalls[i].Function.Arguments = sanitizeToolArgsJSON(msg.ToolCalls[i].Function.Name, msg.ToolCalls[i].Function.Arguments)
+			if msg.ToolCalls[i].ID == "" {
+				msg.ToolCalls[i].ID = fmt.Sprintf("call_%d_%d", round, i)
+			}
+			if msg.ToolCalls[i].Type == "" {
+				msg.ToolCalls[i].Type = "function"
+			}
+		}
+		// Re-bind last history assistant message if we already appended (we append before tools)
+		// Fix: we appended msg above — update it with sanitized args
+		if n := len(a.History); n > 0 {
+			a.History[n-1] = msg
+		}
+
 		// Execute tools sequentially
 		for _, tc := range msg.ToolCalls {
 			name := tc.Function.Name
@@ -386,6 +403,48 @@ func capToolResult(s string, max int) string {
 		return s
 	}
 	return s[:max] + "\n…[truncated for model; do not invent the rest]…"
+}
+
+// sanitizeToolArgsJSON fixes common model argument shapes so tools run and
+// subsequent API rounds don't fail with "invalid tool call arguments".
+func sanitizeToolArgsJSON(name, args string) string {
+	args = strings.TrimSpace(args)
+	if args == "" || args == "null" {
+		return "{}"
+	}
+	// Already an object
+	if strings.HasPrefix(args, "{") && json.Valid([]byte(args)) {
+		return args
+	}
+	// Bare JSON array (git models love this) → wrap
+	if strings.HasPrefix(args, "[") {
+		if name == "git" {
+			// try as args array
+			b, err := json.Marshal(map[string]any{"args": json.RawMessage(args)})
+			if err == nil {
+				return string(b)
+			}
+		}
+		return fmt.Sprintf(`{"args":%s}`, args)
+	}
+	// Double-encoded object string
+	if strings.HasPrefix(args, `"`) {
+		var inner string
+		if err := json.Unmarshal([]byte(args), &inner); err == nil && strings.TrimSpace(inner) != "" {
+			return sanitizeToolArgsJSON(name, inner)
+		}
+	}
+	// Plain text command for git
+	if name == "git" {
+		b, _ := json.Marshal(map[string]string{"command": args})
+		return string(b)
+	}
+	// Fallback: wrap as content/path-ish
+	if !json.Valid([]byte(args)) {
+		b, _ := json.Marshal(map[string]string{"input": args})
+		return string(b)
+	}
+	return args
 }
 
 // isTrivialChat is true for short greetings / small-talk that should not

@@ -8,6 +8,28 @@ import (
 	"testing"
 )
 
+func TestParseGitArgsFlexible(t *testing.T) {
+	cases := []struct {
+		in   string
+		want []string
+	}{
+		{`{"args":["checkout","-b","seo-readme"]}`, []string{"checkout", "-b", "seo-readme"}},
+		{`{"args":"checkout -b seo-readme"}`, []string{"checkout", "-b", "seo-readme"}},
+		{`{"args":"[\"checkout\",\"-b\",\"seo-readme\"]"}`, []string{"checkout", "-b", "seo-readme"}},
+		{`{"command":"git status -sb"}`, []string{"status", "-sb"}},
+		{`["checkout","-b","x"]`, []string{"checkout", "-b", "x"}},
+	}
+	for _, c := range cases {
+		got, err := parseGitArgsJSON(c.in)
+		if err != nil {
+			t.Fatalf("%s: %v", c.in, err)
+		}
+		if strings.Join(got, " ") != strings.Join(c.want, " ") {
+			t.Fatalf("%s => %v want %v", c.in, got, c.want)
+		}
+	}
+}
+
 func TestStrReplaceAndGitAllowlist(t *testing.T) {
 	dir := t.TempDir()
 	cwd, _ := os.Getwd()

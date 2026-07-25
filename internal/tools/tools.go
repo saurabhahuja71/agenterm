@@ -255,34 +255,38 @@ type gitCmd struct{}
 
 func (gitCmd) Name() string { return "git" }
 func (gitCmd) Description() string {
-	return "Run a safe git subcommand: status, diff, log, branch, checkout, switch, add, commit, push, pull, stash. Use for real git ops when the user asks to branch/commit/push. Prefer this over printing git commands as chat text."
+	return `Run a safe git subcommand. Pass either:
+- args as array: {"args":["checkout","-b","seo-readme"]}
+- args as string: {"args":"checkout -b seo-readme"}
+- command string: {"command":"checkout -b seo-readme"} or {"command":"git status"}
+Do not nest JSON arrays as strings. Prefer simple string form if unsure.`
 }
 func (gitCmd) Schema() map[string]any {
 	return map[string]any{
-		"type":     "object",
-		"required": []string{"args"},
+		"type": "object",
 		"properties": map[string]any{
 			"args": map[string]any{
-				"type":        "array",
-				"items":       map[string]any{"type": "string"},
-				"description": "Git argv after 'git', e.g. [\"status\"], [\"checkout\",\"-b\",\"seo-readme\"], [\"add\",\"README.md\"], [\"commit\",\"-m\",\"msg\"]",
+				"description": "Git argv after 'git'. Prefer array [\"status\"] or string \"status -sb\". Also accepts JSON-encoded array string.",
+				// no type constraint — models send array OR string
+			},
+			"command": map[string]any{
+				"type":        "string",
+				"description": "Alternate: full git command without or with leading 'git', e.g. \"checkout -b seo-readme\"",
 			},
 		},
 	}
 }
 func (gitCmd) Run(ctx context.Context, argsJSON string) (string, error) {
-	var in struct {
-		Args []string `json:"args"`
+	args, err := parseGitArgsJSON(argsJSON)
+	if err != nil {
+		return "", err
 	}
-	if err := json.Unmarshal([]byte(argsJSON), &in); err != nil || len(in.Args) == 0 {
-		return "", fmt.Errorf("args required (e.g. [\"status\"])")
-	}
-	if err := validateGitArgs(in.Args); err != nil {
+	if err := validateGitArgs(args); err != nil {
 		return "", err
 	}
 	ctx, cancel := context.WithTimeout(ctx, 120*time.Second)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, "git", in.Args...)
+	cmd := exec.CommandContext(ctx, "git", args...)
 	out, err := cmd.CombinedOutput()
 	s := string(out)
 	if len(s) > 40_000 {
@@ -295,6 +299,123 @@ func (gitCmd) Run(ctx context.Context, argsJSON string) (string, error) {
 		return "ok (no output)", nil
 	}
 	return s, nil
+}
+
+// parseGitArgsJSON accepts many shapes models actually emit.
+func parseGitArgsJSON(argsJSON string) ([]string, error) {
+	raw := strings.TrimSpace(argsJSON)
+	if raw == "" || raw == "{}" || raw == "null" {
+		return nil, fmt.Errorf("args required (e.g. {\"args\":\"checkout -b seo-readme\"})")
+	}
+
+	// Whole payload is a JSON array: ["checkout","-b","seo"]
+	if strings.HasPrefix(raw, "[") {
+		var arr []string
+		if err := json.Unmarshal([]byte(raw), &arr); err == nil && len(arr) > 0 {
+			return normalizeGitArgv(arr), nil
+		}
+	}
+
+	// Generic object map
+	var m map[string]any
+	if err := json.Unmarshal([]byte(raw), &m); err != nil {
+		// bare string command?
+		return splitGitCommand(raw), nil
+	}
+
+	// Prefer args, then command, then argv
+	for _, key := range []string{"args", "command", "argv", "cmd"} {
+		v, ok := m[key]
+		if !ok || v == nil {
+			continue
+		}
+		switch t := v.(type) {
+		case []any:
+			out := make([]string, 0, len(t))
+			for _, x := range t {
+				out = append(out, fmt.Sprint(x))
+			}
+			if len(out) > 0 {
+				return normalizeGitArgv(out), nil
+			}
+		case []string:
+			if len(t) > 0 {
+				return normalizeGitArgv(t), nil
+			}
+		case string:
+			s := strings.TrimSpace(t)
+			if s == "" {
+				continue
+			}
+			// Double-encoded JSON array as string: "[\"checkout\",\"-b\",\"x\"]"
+			if strings.HasPrefix(s, "[") {
+				var arr []string
+				if err := json.Unmarshal([]byte(s), &arr); err == nil && len(arr) > 0 {
+					return normalizeGitArgv(arr), nil
+				}
+			}
+			return splitGitCommand(s), nil
+		}
+	}
+
+	// Single field "subcommand" + rest
+	if sub, ok := m["subcommand"].(string); ok && sub != "" {
+		rest, _ := m["options"].(string)
+		return splitGitCommand(strings.TrimSpace(sub + " " + rest)), nil
+	}
+
+	return nil, fmt.Errorf("could not parse git args from %s — use {\"args\":\"checkout -b branch\"}", truncateLine(raw, 120))
+}
+
+func normalizeGitArgv(args []string) []string {
+	if len(args) == 0 {
+		return args
+	}
+	// Drop leading "git" if model included it
+	if strings.EqualFold(args[0], "git") {
+		args = args[1:]
+	}
+	return args
+}
+
+func splitGitCommand(s string) []string {
+	s = strings.TrimSpace(s)
+	s = strings.TrimPrefix(s, "git ")
+	s = strings.TrimPrefix(s, "git\t")
+	if s == "" {
+		return nil
+	}
+	// simple split respecting basic quotes
+	var out []string
+	var cur strings.Builder
+	inQ := byte(0)
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if inQ != 0 {
+			if c == inQ {
+				inQ = 0
+			} else {
+				cur.WriteByte(c)
+			}
+			continue
+		}
+		if c == '"' || c == '\'' {
+			inQ = c
+			continue
+		}
+		if c == ' ' || c == '\t' {
+			if cur.Len() > 0 {
+				out = append(out, cur.String())
+				cur.Reset()
+			}
+			continue
+		}
+		cur.WriteByte(c)
+	}
+	if cur.Len() > 0 {
+		out = append(out, cur.String())
+	}
+	return normalizeGitArgv(out)
 }
 
 func validateGitArgs(args []string) error {
