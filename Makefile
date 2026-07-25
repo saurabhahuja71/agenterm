@@ -1,4 +1,4 @@
-VERSION ?= 0.1.6
+VERSION ?= 0.1.7
 BINARY  := agenterm
 MODULE  := ./cmd/agenterm
 LDFLAGS := -s -w -X main.version=$(VERSION)
@@ -74,6 +74,6 @@ container:
 container-run:
 	$(ENGINE) run --rm -it --network=host \
 		-e AGENTERM_BASE_URL=$${AGENTERM_BASE_URL:-http://127.0.0.1:11434/v1} \
-		-e AGENTERM_MODEL=$${AGENTERM_MODEL:-llama3.2} \
+		-e AGENTERM_MODEL=$${AGENTERM_MODEL:-qwen2.5-coder:32b} \
 		-v "$$HOME/.agenterm:/home/agenterm/.agenterm:Z" \
 		agenterm:$(VERSION)

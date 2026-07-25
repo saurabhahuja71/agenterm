@@ -59,7 +59,7 @@ exec $ENGINE run --rm -it \
   -e TERM="${TERM:-xterm-256color}" \
   -e COLORTERM="${COLORTERM:-truecolor}" \
   -e AGENTERM_BASE_URL="${AGENTERM_BASE_URL:-http://127.0.0.1:11434/v1}" \
-  -e AGENTERM_MODEL="${AGENTERM_MODEL:-llama3.2}" \
+  -e AGENTERM_MODEL="${AGENTERM_MODEL:-qwen2.5-coder:32b}" \
   -e AGENTERM_API_KEY="${AGENTERM_API_KEY:-ollama}" \
   "${ENV_ARGS[@]}" \
   -v "$CONFIG_DIR:/home/agenterm/.agenterm:Z" \

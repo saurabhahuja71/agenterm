@@ -136,7 +136,7 @@ go install github.com/saurabhahuja71/agenterm/cmd/agenterm@latest
 ### 1. Run Ollama (local or tunnel)
 
 ```bash
-ollama pull llama3.2
+ollama pull qwen2.5-coder:32b   # default for Go + docs agent work
 ollama serve   # http://127.0.0.1:11434
 ```
 
@@ -151,9 +151,9 @@ ssh -N -L 11434:127.0.0.1:11434 user@gpu-host
 
 ```bash
 agenterm --ping
-agenterm -m llama3.2
+agenterm -m qwen2.5-coder:32b
 # pure chat (fastest):
-agenterm --no-tools -m llama3.2
+agenterm --no-tools -m qwen2.5-coder:32b
 ```
 
 ### 3. In the TUI
@@ -176,7 +176,7 @@ agenterm --no-tools -m llama3.2
 
 ```toml
 provider = "ollama-local"
-model = "llama3.2"
+model = "qwen2.5-coder:32b"
 base_url = "http://127.0.0.1:11434/v1"
 api_key = "ollama"
 ```
@@ -196,7 +196,7 @@ model = "qwen2.5"
 
 ```bash
 # local or SSH tunnel
-agenterm --base-url http://127.0.0.1:11434/v1 -m llama3.2
+agenterm --base-url http://127.0.0.1:11434/v1 -m qwen2.5-coder:32b
 
 # remote host
 agenterm --base-url http://gpu-box:11434/v1 -m qwen2.5

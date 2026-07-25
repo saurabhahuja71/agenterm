@@ -4,7 +4,9 @@
 provider = "ollama-local"
 
 # Chat model (Ollama tag or cloud model id)
-model = "llama3.2"
+# Default for Go + documentation agent work: qwen2.5-coder:32b
+# (see docs/grok-parity-roadmap.md). Alternate: qwen3-coder:30b
+model = "qwen2.5-coder:32b"
 
 # OpenAI-compatible root. For Ollama always include /v1
 # Local / SSH tunnel:
@@ -44,13 +46,13 @@ Tools (list_dir, read_file, write_file, find_files, …):
 [providers.ollama-local]
 base_url = "http://127.0.0.1:11434/v1"
 api_key = "ollama"
-model = "llama3.2"
+model = "qwen2.5-coder:32b"
 
 [providers.ollama-remote]
 # Change host to your remote Ollama server
 base_url = "http://127.0.0.1:11434/v1"
 api_key = "ollama"
-model = "llama3.2"
+model = "qwen2.5-coder:32b"
 
 [providers.xai]
 base_url = "https://api.x.ai/v1"

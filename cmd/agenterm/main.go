@@ -16,7 +16,7 @@ import (
 )
 
 var (
-	version = "0.1.6"
+	version = "0.1.7"
 	flagProvider string
 	flagModel    string
 	flagBaseURL  string
@@ -37,7 +37,7 @@ func main() {
 		RunE:    runTUI,
 	}
 	root.Flags().StringVar(&flagProvider, "provider", "", "provider preset: ollama-local | ollama-remote | xai | openai | custom")
-	root.Flags().StringVarP(&flagModel, "model", "m", "", "model id (e.g. llama3.2, qwen2.5, grok-3)")
+	root.Flags().StringVarP(&flagModel, "model", "m", "", "model id (e.g. qwen2.5-coder:32b, qwen3-coder:30b, grok-3)")
 	root.Flags().StringVar(&flagBaseURL, "base-url", "", "OpenAI-compatible API base (e.g. http://127.0.0.1:11434/v1)")
 	root.Flags().StringVar(&flagAPIKey, "api-key", "", "API key (optional for Ollama)")
 	root.Flags().StringVar(&flagConfig, "config", "", "path to config.toml (default ~/.agenterm/config.toml)")

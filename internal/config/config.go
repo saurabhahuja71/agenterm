@@ -72,7 +72,8 @@ type MCPServer struct {
 func Default() Config {
 	return Config{
 		Provider:    "ollama-local",
-		Model:       "llama3.2",
+		// Best local default for Go + docs + tools (see docs/grok-parity-roadmap.md).
+		Model:       "qwen2.5-coder:32b",
 		BaseURL:     "http://127.0.0.1:11434/v1",
 		APIKey:      "ollama",
 		Temperature: 0.7,
@@ -96,12 +97,12 @@ Tools (list_dir, read_file, write_file, find_files, …):
 			"ollama-local": {
 				BaseURL: "http://127.0.0.1:11434/v1",
 				APIKey:  "ollama",
-				Model:   "llama3.2",
+				Model:   "qwen2.5-coder:32b",
 			},
 			"ollama-remote": {
 				BaseURL: "http://127.0.0.1:11434/v1", // user should edit host
 				APIKey:  "ollama",
-				Model:   "llama3.2",
+				Model:   "qwen2.5-coder:32b",
 			},
 			"xai": {
 				BaseURL: "https://api.x.ai/v1",
@@ -205,7 +206,7 @@ func (c Config) Resolve() Config {
 	}
 	out.BaseURL = strings.TrimRight(out.BaseURL, "/")
 	if out.Model == "" {
-		out.Model = "llama3.2"
+		out.Model = "qwen2.5-coder:32b"
 	}
 	if out.APIKey == "" {
 		out.APIKey = "ollama"

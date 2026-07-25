@@ -19,7 +19,7 @@ services:
     environment:
       AGENTERM_PROVIDER: ${AGENTERM_PROVIDER:-ollama-local}
       AGENTERM_BASE_URL: ${AGENTERM_BASE_URL:-http://127.0.0.1:11434/v1}
-      AGENTERM_MODEL: ${AGENTERM_MODEL:-llama3.2}
+      AGENTERM_MODEL: ${AGENTERM_MODEL:-qwen2.5-coder:32b}
       AGENTERM_API_KEY: ${AGENTERM_API_KEY:-ollama}
       # Cloud keys (optional)
       XAI_API_KEY: ${XAI_API_KEY:-}

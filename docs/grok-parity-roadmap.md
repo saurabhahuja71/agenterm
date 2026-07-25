@@ -4,6 +4,72 @@
 **Last updated:** 2026-07-25  
 **Related:** [README](../README.md), [how-it-works](how-it-works.md)
 
+**Default Ollama model (Go + docs agent work):** `qwen2.5-coder:32b`  
+(set as project default in config; see [Recommended LLM](#recommended-llm-for-golang--documentation) below)
+
+---
+
+## Recommended LLM for Golang & documentation
+
+Inventory from the lab host (`ollama list`, 2026-07-25):
+
+| Name | Size | Role fit for **agenterm** |
+|------|------|---------------------------|
+| **qwen2.5-coder:32b** | 19 GB | **Best default** — coding + tools + structured file work |
+| **qwen3-coder:30b** / `qwen3-coder:latest` | 18 GB | Strong alternate (same image id); excelled in our smoke tests |
+| qwen3.6-plus:latest | 19 GB | Chatty; weak tool discipline; invents file trees — **avoid as agent default** |
+| qwen3.6:latest | 23 GB | General; heavier; not first choice for tools |
+| deepseek-r1:32b | 19 GB | Strong reasoning; slow TTFT / “thinking”; poor fit for snappy docs Q&A |
+| deepseek-r1:latest | 5.2 GB | Lighter R1; same reasoning style, less capacity |
+| gpt-oss:20b | 13 GB | Smaller general model; OK fallback if 32B is too slow |
+
+### Decision (use this Monday)
+
+| Use case | Model | Why |
+|----------|--------|-----|
+| **Default for agenterm** (Go code + README/docs + tools) | **`qwen2.5-coder:32b`** | Built as a **coder** model: better function/tool use, path/file discipline, Go-oriented edits, less “essay” noise than general chat models |
+| Alternate if 2.5 misbehaves on tools | `qwen3-coder:30b` | Passed full smoke (`hi`, `list_dir`, `read_file`, `find_files`, sidb README) cleanly |
+| Pure long reasoning (rare) | `deepseek-r1:32b` | Only when you want deep chain-of-thought; expect load + wait |
+| Casual chat only | `qwen3.6-plus:latest` | Not for repo agent tasks |
+
+### How to run with the default
+
+```bash
+# project default after config update
+agenterm
+
+# explicit
+agenterm -m qwen2.5-coder:32b
+
+# in TUI
+/model qwen2.5-coder:32b
+```
+
+Config (`~/.agenterm/config.toml`):
+
+```toml
+provider = "ollama-local"
+model = "qwen2.5-coder:32b"
+base_url = "http://127.0.0.1:11434/v1"
+```
+
+If an old config still has `llama3.2` or `qwen3.6-plus`, either edit `model =` or:
+
+```bash
+agenterm init --force   # rewrites defaults (review first)
+# then set model again if needed
+```
+
+### Why not qwen3.6-plus for this project?
+
+We observed with agenterm + Ollama:
+
+- Tool calls often printed as **plain JSON** instead of API `tool_calls`
+- **Invented** directory listings (e.g. fake `config.go` / `db.go`) instead of tool ground truth
+- Long preambles (“Let’s read…”) — more UI noise
+
+Coder-tagged Qwen models behave better for **Golang + documentation agent** workflows.
+
 ---
 
 ## Why agenterm does not feel as good as Grok
@@ -168,7 +234,7 @@ You will not match **hosted Grok** by only polishing the TUI.
 | **Best lightweight Ollama/xAI terminal agent** | Yes — focus Phases A–B |
 | **Clone of Grok UI** | No — needs xAI model + product + infra |
 
-**Prefer for tool work:** models like `qwen3-coder:*` over chatty “plus” general models when using Ollama.
+**Prefer for tool work:** **`qwen2.5-coder:32b`** (default) or `qwen3-coder:30b` — not chatty “plus” general models.
 
 ---
 
@@ -189,10 +255,11 @@ You will not match **hosted Grok** by only polishing the TUI.
 ## Monday resume checklist
 
 - [ ] Re-read this doc + skim `internal/agent`, `internal/tui`, `internal/tools`
+- [ ] Confirm Ollama has **`qwen2.5-coder:32b`** loaded; use as default (`-m` or config)
 - [ ] Pick **Phase A** items (suggest: `@file` + `grep` + session history)
-- [ ] Decide default model story: Ollama coder vs xAI Grok API
-- [ ] Optional: tag release `v0.1.6+` so install script gets binaries without source build
-- [ ] Manual: from `dboper/` cwd, “can you read sidb/oracle-database-operator/README.md? yes or no”
+- [ ] Optional later: first-class xAI Grok API preset (cloud), keep Ollama coder for local
+- [ ] Optional: tag release so install script gets binaries without source build
+- [ ] Manual: from `dboper/` cwd with `qwen2.5-coder:32b` — “can you read sidb/oracle-database-operator/README.md? yes or no”
 
 ---
 
