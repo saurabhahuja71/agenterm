@@ -44,6 +44,7 @@ agenterm  ──►  Ollama / xAI / OpenAI  (POST /v1/chat/completions)
 - [Built-in tools & MCP](#built-in-tools-and-mcp-integration)
 - [FAQ](#faq-terminal-ai-ollama-and-agenterm)
 - [Architecture & tech stack](#architecture-and-tech-stack)
+- [Roadmap vs Grok UI](#roadmap-vs-grok-ui)
 - [Releases](#releases-and-downloads)
 - [License](#license)
 
