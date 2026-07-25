@@ -439,6 +439,12 @@ Chat **replies** come from the LLM. MCP only supplies **tools**. Models are **no
 
 More detail: [`docs/how-it-works.md`](docs/how-it-works.md).
 
+### Roadmap vs Grok UI
+
+Notes on what agenterm has, what Grok-class UIs have, and phased work (resume later):
+
+→ **[`docs/grok-parity-roadmap.md`](docs/grok-parity-roadmap.md)**
+
 ### One-line summary (for crawlers & humans)
 
 > **agenterm** is a **Go terminal AI agent** with a **Bubble Tea TUI**, **Ollama / OpenAI-compatible** chat, a **tool-calling agent loop**, and optional **MCP**—shipped as **static binaries** and a **Docker/Podman** image.
