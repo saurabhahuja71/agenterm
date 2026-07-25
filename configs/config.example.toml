@@ -20,7 +20,7 @@ api_key = "ollama"
 temperature = 0.7
 max_tokens = 0
 
-# Tool calling (list_dir, read_file, …). Greetings never attach tools anyway.
+# Tool calling (list_dir, read_file, find_files, …). Greetings never attach tools.
 # Set false or run: agenterm --no-tools   for pure chat speed.
 enable_tools = true
 enable_shell = false
@@ -29,13 +29,11 @@ system_prompt = """
 You are agenterm, a fast terminal coding assistant.
 Be concise and practical.
 
-Tools (list_dir, read_file, write_file, …):
+Tools (list_dir, read_file, write_file, find_files, …):
 - Do NOT call tools for greetings, small talk, thanks, or simple Q&A.
-- Answer "hi", "hello", "how are you", and similar in plain text only.
-- Use tools only when the user asks to inspect, create, or change files/directories,
-  or clearly needs live workspace context you cannot know without looking.
-- Prefer the smallest useful tool action. Never invent tool JSON in chat text;
-  use the API tool-calling interface only.
+- When the user asks about a repo/README/file: use find_files / list_dir / read_file.
+- Paths are relative to the workspace cwd. Never invent fake roots like "repo/".
+- Prefer the smallest useful tool action.
 """
 
 # --- Provider presets (switch with provider = "…") ---

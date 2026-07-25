@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"fmt"
+	"os"
 	"strings"
 
 	"github.com/saurabhahuja71/agenterm/internal/config"
@@ -43,8 +44,12 @@ type Agent struct {
 func New(cfg config.Config, client *llm.Client, reg *tools.Registry) *Agent {
 	e := cfg.Effective()
 	hist := []llm.Message{}
-	if strings.TrimSpace(e.SystemPrompt) != "" {
-		hist = append(hist, llm.Message{Role: llm.RoleSystem, Content: e.SystemPrompt})
+	sys := strings.TrimSpace(e.SystemPrompt)
+	if sys != "" {
+		sys = sys + "\n\n" + workspaceHint()
+		hist = append(hist, llm.Message{Role: llm.RoleSystem, Content: sys})
+	} else {
+		hist = append(hist, llm.Message{Role: llm.RoleSystem, Content: workspaceHint()})
 	}
 	return &Agent{
 		Cfg:           e,
@@ -53,6 +58,23 @@ func New(cfg config.Config, client *llm.Client, reg *tools.Registry) *Agent {
 		History:       hist,
 		MaxToolRounds: 8,
 	}
+}
+
+// workspaceHint tells the model where tools resolve paths (critical for repo reads).
+func workspaceHint() string {
+	cwd, err := os.Getwd()
+	if err != nil || cwd == "" {
+		cwd = "."
+	}
+	return strings.TrimSpace(fmt.Sprintf(`
+Workspace (tool paths resolve here):
+- Current working directory: %s
+- Paths for read_file / list_dir / write_file / find_files are relative to that cwd, or absolute.
+- Do NOT invent prefixes like "repo/". Use real paths under the cwd.
+- If the user names a project (e.g. dboper/sidb/oracle-database-operator), first list_dir or find_files to locate README.md, then read_file.
+- Prefer find_files with name "README.md" under a likely root when the exact path is unknown.
+- Use the API tool-calling interface. If you must emit JSON, use exactly: {"name":"read_file","arguments":{"path":"..."}}
+`, cwd))
 }
 
 // Reset clears chat history but keeps system prompt.
@@ -102,6 +124,15 @@ func (a *Agent) RunUserMessage(ctx context.Context, user string, emit func(Event
 		if err != nil {
 			emit(Event{Kind: EventError, Text: err.Error()})
 			return err
+		}
+
+		// Ollama/Qwen often print tools as plain JSON content — recover and run them.
+		if len(msg.ToolCalls) == 0 && a.Cfg.EnableTools && a.Tools != nil {
+			if recovered, rest := extractToolCallsFromContent(msg.Content, toolNameSet(a.Tools)); len(recovered) > 0 {
+				emit(Event{Kind: EventStatus, Text: fmt.Sprintf("recovered %d tool call(s) from text", len(recovered))})
+				msg.ToolCalls = recovered
+				msg.Content = rest
+			}
 		}
 
 		// Persist assistant turn

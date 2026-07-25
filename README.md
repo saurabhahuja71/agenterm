@@ -317,10 +317,13 @@ Example file: [`configs/config.example.toml`](configs/config.example.toml).
 
 | Tool | Notes |
 |------|--------|
-| `list_dir` | List directory |
-| `read_file` | Read file |
+| `list_dir` | List directory (path relative to process cwd) |
+| `read_file` | Read file; resolves common bad paths (`repo/…`, `dbope`→`dboper`) |
 | `write_file` | Write file |
+| `find_files` | Locate `README.md` / project folders when the full path is unknown |
 | `run_shell` | Off by default; `enable_shell = true` or `--shell` |
+
+**Tip:** start agenterm from the workspace root you care about (e.g. `cd …/dboper && agenterm`). Paths and tools use that directory.
 
 ### MCP tools
 

@@ -81,13 +81,14 @@ func Default() Config {
 		SystemPrompt: `You are agenterm, a fast terminal coding assistant.
 Be concise and practical.
 
-Tools (list_dir, read_file, write_file, …):
+Tools (list_dir, read_file, write_file, find_files, …):
 - Do NOT call tools for greetings, small talk, thanks, or simple Q&A.
 - Answer "hi", "hello", "how are you", and similar in plain text only.
-- Use tools only when the user asks to inspect, create, or change files/directories,
-  or clearly needs live workspace context you cannot know without looking.
-- Prefer the smallest useful tool action. Never invent tool JSON in chat text;
-  use the API tool-calling interface only.`,
+- When the user asks about a repo, README, file, or directory: you MUST use tools
+  (find_files / list_dir / read_file). Do not guess file contents.
+- Paths are relative to the workspace cwd (see system workspace hint). Never invent
+  fake roots like "repo/". If unsure, find_files or list_dir first.
+- Prefer the smallest useful tool action. Use the API tool-calling interface when possible.`,
 		Providers: map[string]Provider{
 			"ollama-local": {
 				BaseURL: "http://127.0.0.1:11434/v1",
