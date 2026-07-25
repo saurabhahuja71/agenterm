@@ -10,7 +10,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
-	"syscall"
 	"time"
 
 	"github.com/saurabhahuja71/agenterm/internal/llm"
@@ -497,13 +496,11 @@ func (runShell) Run(ctx context.Context, argsJSON string) (string, error) {
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "bash", "-lc", cmdStr)
 	cmd.Env = os.Environ()
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	// Extra kill of process group when context ends (CommandContext only kills bash).
+	// Unix: set process group so timeout kills children (xargs/curl). Windows: plain kill.
+	cmd.SysProcAttr = shellSysProcAttr()
 	go func() {
 		<-ctx.Done()
-		if cmd.Process != nil {
-			_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
-		}
+		killShellProcess(cmd.Process)
 	}()
 	out, err := cmd.CombinedOutput()
 	s := string(out)
