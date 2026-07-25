@@ -21,11 +21,27 @@ type Client struct {
 }
 
 func New(baseURL, apiKey string) *Client {
+	// Streaming has no overall Timeout (models can load for minutes), but we
+	// must bound time-to-first-byte so a wedged Ollama does not hang forever.
+	var transport http.RoundTripper
+	if base, ok := http.DefaultTransport.(*http.Transport); ok {
+		t := base.Clone()
+		t.ResponseHeaderTimeout = 8 * time.Minute
+		t.IdleConnTimeout = 90 * time.Second
+		transport = t
+	} else {
+		transport = &http.Transport{
+			Proxy:                 http.ProxyFromEnvironment,
+			ResponseHeaderTimeout: 8 * time.Minute,
+			IdleConnTimeout:       90 * time.Second,
+		}
+	}
 	return &Client{
 		BaseURL: strings.TrimRight(baseURL, "/"),
 		APIKey:  apiKey,
 		HTTPClient: &http.Client{
-			Timeout: 0, // streaming can be long; use context
+			Timeout:   0, // body stream can be long; use context + header timeout
+			Transport: transport,
 		},
 	}
 }

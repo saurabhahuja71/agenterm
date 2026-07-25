@@ -40,6 +40,8 @@ type Agent struct {
 	History []llm.Message
 	// MaxToolRounds prevents infinite tool loops.
 	MaxToolRounds int
+	// PlanMode: Grok-like plan first — no tools; model only outlines steps.
+	PlanMode bool
 }
 
 func New(cfg config.Config, client *llm.Client, reg *tools.Registry) *Agent {
@@ -80,7 +82,8 @@ Workspace (tool paths resolve here):
 - User can attach context with @path (e.g. @README.md @internal/agent).
 - Do NOT invent prefixes like "repo/" or invent file names (no fake main.go/config.go lists).
 - Only report paths that appeared in tool results or @mentions.
-- Prefer grep to search code; find_files to locate names; str_replace to edit; run_tests after code changes.
+- Prefer grep / repo_map to explore; find_files to locate names; str_replace to edit; run_tests after code changes.
+- Link checks: grep for https?:// in files, then fetch each URL (cap ~15). Never xargs+curl/wget crawls.
 - For "can you do it" / apply / implement: use tools. Do not only print a plan.
 `, cwd, root))
 }
@@ -160,15 +163,43 @@ func (a *Agent) RunUserMessage(ctx context.Context, user string, emit func(Event
 		payload = payload + "\n\n[agenterm] Execute now with tools (str_replace/write_file/git/grep/run_tests). Do not only print steps."
 		emit(Event{Kind: EventStatus, Text: "action mode: will apply changes via tools"})
 	}
+	if isLinkCheckRequest(user) && !a.PlanMode {
+		payload = payload + "\n\n[agenterm] LINK CHECK: Do NOT print shell commands. " +
+			"1) Call the grep tool with pattern https?:// (or http) on the repo. " +
+			"2) Call fetch for each unique http(s) URL found (max 15). " +
+			"3) Report only broken/non-200 links. Never use xargs, pipelines, or run_shell for this."
+		emit(Event{Kind: EventStatus, Text: "link-check mode: built-in grep + fetch"})
+	}
+	if a.PlanMode {
+		payload = payload + "\n\n[agenterm] PLAN MODE: Do not call tools. Produce a numbered plan only " +
+			"(goal, steps, files to touch, risks). Wait for the user to say /plan off and implement."
+		emit(Event{Kind: EventStatus, Text: "plan mode: tools off — outline steps only"})
+	}
 	a.History = append(a.History, llm.Message{Role: llm.RoleUser, Content: payload})
+
+	// Deterministic link check: models dump shell and leave an empty "ready" UI.
+	// Run grep+fetch ourselves and always emit a real report.
+	if isLinkCheckRequest(user) && !a.PlanMode && a.Cfg.EnableTools && a.Tools != nil {
+		emit(Event{Kind: EventStatus, Text: "running built-in link check…"})
+		report := a.runDeterministicLinkCheck(ctx, emit)
+		if report == "cancelled" {
+			emit(Event{Kind: EventError, Text: "cancelled"})
+			emit(Event{Kind: EventDone})
+			return ctx.Err()
+		}
+		a.History = append(a.History, llm.Message{Role: llm.RoleAssistant, Content: report})
+		emit(Event{Kind: EventToken, Text: report})
+		emit(Event{Kind: EventDone})
+		return nil
+	}
 
 	// Attach tools only when enabled and the turn is not pure small-talk.
 	// Skipping tools for greetings avoids a pointless second LLM round-trip
 	// (common with Ollama models that eagerly call list_dir on "hi").
 	var toolSchemas []llm.Tool
-	attachTools := a.Cfg.EnableTools && a.Tools != nil && !isTrivialChat(user)
-	// @mentions or action → always allow tools
-	if a.Cfg.EnableTools && a.Tools != nil && (attached != "" || isActionRequest(user)) {
+	attachTools := a.Cfg.EnableTools && a.Tools != nil && !isTrivialChat(user) && !a.PlanMode
+	// @mentions or action → always allow tools (unless plan mode)
+	if a.Cfg.EnableTools && a.Tools != nil && !a.PlanMode && (attached != "" || isActionRequest(user)) {
 		attachTools = true
 	}
 	if attachTools {
@@ -267,14 +298,50 @@ Do not answer with only a markdown plan or shell snippets.`,
 				msg.Content = rest
 			}
 		}
+		// Models dump bare shell (grep|xargs…) instead of tool_calls — recover or refuse.
+		if len(msg.ToolCalls) == 0 && len(roundTools) > 0 && a.Tools != nil {
+			if recovered, rest, note := recoverShellishContent(msg.Content, toolNameSet(a.Tools)); len(recovered) > 0 {
+				emit(Event{Kind: EventStatus, Text: note})
+				msg.ToolCalls = recovered
+				msg.Content = rest
+			} else if note != "" {
+				emit(Event{Kind: EventStatus, Text: note})
+				// Replace shell dump with a short redirect so TUI does not show it as the answer.
+				if isShellOnlyAssistantText(msg.Content) {
+					msg.Content = ""
+				}
+			}
+		}
 
 		// Persist assistant turn (without the ephemeral after-tools system nudge)
 		a.History = append(a.History, msg)
 
 		if len(msg.ToolCalls) == 0 {
-			// Some models return only whitespace after a long load — surface it.
-			if strings.TrimSpace(msg.Content) == "" {
-				emit(Event{Kind: EventToken, Text: "(empty reply — model may still be loading; try again or /model list)"})
+			// Shell dump / empty — don't leave the user staring at a blank "ready".
+			trim := strings.TrimSpace(msg.Content)
+			if trim == "" || isShellOnlyAssistantText(trim) {
+				// Fix history: last assistant was empty/shell — replace content with a short note
+				// so the next API round is not confused (do not append a second assistant).
+				if n := len(a.History); n > 0 && a.History[n-1].Role == llm.RoleAssistant {
+					a.History[n-1].Content = "(ignored shell/empty; use tools next)"
+				}
+				if toolsUsed == 0 && round == 0 && attachTools {
+					// Force one more round with an explicit system nudge (not a fake tool_call pair).
+					emit(Event{Kind: EventStatus, Text: "empty/shell reply — asking model again with tools"})
+					// Drop the useless assistant turn so we don't poison history.
+					if n := len(a.History); n > 0 && a.History[n-1].Role == llm.RoleAssistant {
+						a.History = a.History[:n-1]
+					}
+					// Fall through by continuing loop without toolsUsed bump — same user, retry round.
+					// Inject ephemeral nudge via toolsUsed path: set toolsUsed=-1 trick? Use a flag.
+					// Simpler: append a system-visible user hint once.
+					a.History = append(a.History, llm.Message{
+						Role:    llm.RoleUser,
+						Content: "[agenterm] Your previous reply was empty or only a shell command. Call real tools now (grep/read_file/fetch). Do not print shell.",
+					})
+					continue
+				}
+				emit(Event{Kind: EventToken, Text: "(no answer — model returned empty or a shell command. Try /retry with a clearer request, or /tools on.)"})
 			}
 			emit(Event{Kind: EventDone})
 			return nil
@@ -296,17 +363,23 @@ Do not answer with only a markdown plan or shell snippets.`,
 			a.History[n-1] = msg
 		}
 
-		// Execute tools sequentially
+		// Execute tools sequentially (each tool has its own timeout inside the runner).
 		for _, tc := range msg.ToolCalls {
+			if err := ctx.Err(); err != nil {
+				emit(Event{Kind: EventError, Text: "cancelled"})
+				emit(Event{Kind: EventDone})
+				return err
+			}
 			name := tc.Function.Name
 			args := tc.Function.Arguments
 			emit(Event{Kind: EventToolStart, Tool: name, Text: args})
+			emit(Event{Kind: EventStatus, Text: fmt.Sprintf("running %s…", name)})
 			out, err := a.Tools.Run(ctx, name, args)
 			if err != nil {
 				out = fmt.Sprintf("error: %v\n%s", err, out)
 			}
 			// Cap what the model sees so it does not re-dump huge listings into chat.
-			outForModel := capToolResult(out, 10_000)
+			outForModel := capToolResult(out, 6_000)
 			emit(Event{Kind: EventToolEnd, Tool: name, ToolOut: out}) // TUI uses compact formatter
 			a.History = append(a.History, llm.Message{
 				Role:       llm.RoleTool,
@@ -367,6 +440,111 @@ Rules:
 		base += "\n- This is a yes/no style question: start with Yes or No, then one short line of detail."
 	}
 	return base
+}
+
+// isLinkCheckRequest detects "check links" style tasks that models mishandle with shell.
+func isLinkCheckRequest(user string) bool {
+	s := strings.ToLower(strings.TrimSpace(user))
+	if s == "" {
+		return false
+	}
+	if strings.Contains(s, "link") && (strings.Contains(s, "check") || strings.Contains(s, "working") ||
+		strings.Contains(s, "broken") || strings.Contains(s, "valid") || strings.Contains(s, "verify") ||
+		strings.Contains(s, "test") || strings.Contains(s, "all")) {
+		return true
+	}
+	if strings.Contains(s, "urls") && (strings.Contains(s, "check") || strings.Contains(s, "broken")) {
+		return true
+	}
+	return false
+}
+
+// isShellOnlyAssistantText is true when the model dumped a shell recipe as its whole reply.
+func isShellOnlyAssistantText(s string) bool {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return false
+	}
+	low := strings.ToLower(s)
+	// strip fences
+	if strings.HasPrefix(s, "```") {
+		body := strings.TrimSpace(strings.TrimPrefix(s, "```"))
+		for _, lang := range []string{"bash", "sh", "shell", "zsh"} {
+			if strings.HasPrefix(strings.ToLower(body), lang) {
+				body = strings.TrimSpace(body[len(lang):])
+				break
+			}
+		}
+		if i := strings.Index(body, "```"); i >= 0 {
+			body = strings.TrimSpace(body[:i])
+		}
+		s, low = body, strings.ToLower(body)
+	}
+	if strings.Contains(low, "xargs") {
+		return true
+	}
+	if strings.Contains(low, "|") && (strings.Contains(low, "grep") || strings.Contains(low, "curl") || strings.Contains(low, "wget")) {
+		return true
+	}
+	for _, p := range []string{"grep ", "rg ", "find ", "xargs ", "curl ", "wget ", "run_shell"} {
+		if strings.HasPrefix(low, p) {
+			return true
+		}
+	}
+	return false
+}
+
+// recoverShellishContent turns bare shell dumps into safe tool calls when possible.
+// If the shell would be blocked, returns a note and no calls.
+func recoverShellishContent(content string, known map[string]struct{}) ([]llm.ToolCall, string, string) {
+	s := strings.TrimSpace(content)
+	if s == "" || !isShellOnlyAssistantText(s) {
+		return nil, content, ""
+	}
+	// unwrap fence
+	cmd := s
+	if strings.HasPrefix(s, "```") {
+		body := strings.TrimSpace(strings.TrimPrefix(s, "```"))
+		for _, lang := range []string{"bash", "sh", "shell", "zsh"} {
+			if strings.HasPrefix(strings.ToLower(body), lang) {
+				body = strings.TrimSpace(body[len(lang):])
+				break
+			}
+		}
+		if i := strings.Index(body, "```"); i >= 0 {
+			body = strings.TrimSpace(body[:i])
+		}
+		cmd = body
+	}
+	// Prefer mapping URL-harvest shells to grep tool (safe).
+	low := strings.ToLower(cmd)
+	if _, ok := known["grep"]; ok && (strings.Contains(low, "http") || strings.Contains(low, "https")) {
+		if strings.Contains(low, "grep") || strings.Contains(low, "rg ") || strings.Contains(low, "xargs") {
+			args := `{"pattern":"https?://","path":".","max_results":40}`
+			tc := llm.ToolCall{
+				ID:   fmt.Sprintf("recover_grep_%d", len(cmd)),
+				Type: "function",
+				Function: llm.FunctionCall{
+					Name:      "grep",
+					Arguments: args,
+				},
+			}
+			return []llm.ToolCall{tc}, "", "recovered shell dump → grep tool (https?://)"
+		}
+	}
+	if reason := tools.ShellCommandBlocked(cmd); reason != "" {
+		return nil, "", "refused shell dump: " + reason
+	}
+	if _, ok := known["run_shell"]; ok {
+		b, _ := json.Marshal(map[string]string{"command": cmd})
+		tc := llm.ToolCall{
+			ID:   "recover_shell",
+			Type: "function",
+			Function: llm.FunctionCall{Name: "run_shell", Arguments: string(b)},
+		}
+		return []llm.ToolCall{tc}, "", "recovered shell dump → run_shell"
+	}
+	return nil, content, ""
 }
 
 // isActionRequest is true when the user wants real on-disk / git changes, not advice only.

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"time"
@@ -15,6 +16,7 @@ import (
 	"github.com/charmbracelet/glamour"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/saurabhahuja71/agenterm/internal/agent"
+	"github.com/saurabhahuja71/agenterm/internal/tools"
 )
 
 // OSC / color-query replies that leak into stdin when libraries probe the TTY
@@ -78,6 +80,14 @@ type model struct {
 	verbose bool
 	// scrubLeft: remaining startup OSC scrub passes (color-query junk).
 	scrubLeft int
+	// modelPick: interactive /model list (Tab cycle, Enter select, Esc cancel).
+	modelPick *modelPicker
+}
+
+// modelPicker is the interactive model selector opened by /model.
+type modelPicker struct {
+	ids []string
+	idx int // highlighted index
 }
 
 type streamEvMsg agent.Event
@@ -94,8 +104,8 @@ func New(deps Deps) model {
 	ta.ShowLineNumbers = false
 	ta.FocusedStyle.CursorLine = lipgloss.NewStyle()
 	ta.BlurredStyle.CursorLine = lipgloss.NewStyle()
-	// Enter sends (not newline). Use Alt+Enter for newline if needed later.
-	ta.KeyMap.InsertNewline.SetEnabled(false)
+	// Enter sends. Alt+Enter inserts a newline (Grok/ChatGPT-style multi-line).
+	ta.KeyMap.InsertNewline.SetEnabled(true)
 
 	vp := viewport.New(80, 20)
 
@@ -113,9 +123,8 @@ func New(deps Deps) model {
 		verbose:   false, // compact tools by default
 		scrubLeft: 5,     // a few startup passes to catch late OSC replies
 		lines: []chatLine{
-			{role: "system", text: "agenterm — snappy terminal agent (Ollama / OpenAI-compatible + MCP)"},
-			{role: "system", text: "Endpoint: " + deps.Summary},
-			{role: "system", text: "Quiet mode on · /verbose for full tool output · /help"},
+			// One short banner — path lives above the prompt; tools stay in the status bar.
+			{role: "system", text: deps.Summary + " · /help"},
 		},
 	}
 	m.refreshViewport()
@@ -155,6 +164,15 @@ func newGlamourRenderer(width int) *glamour.TermRenderer {
 	return r
 }
 
+func looksLikeTerminalGarbage(s string) bool {
+	return strings.Contains(s, "]11;") ||
+		strings.Contains(s, "]10;") ||
+		strings.Contains(s, "rgb:") ||
+		strings.Contains(s, "\x1b]") ||
+		strings.Contains(s, "\x1b\\") ||
+		strings.Contains(s, "\x07")
+}
+
 // scrubTerminalGarbage removes leaked OSC / rgb color-query fragments.
 func scrubTerminalGarbage(s string) string {
 	if s == "" {
@@ -164,6 +182,7 @@ func scrubTerminalGarbage(s string) string {
 	// Common partials if ESC was consumed already
 	out = strings.ReplaceAll(out, "]11;", "")
 	out = strings.ReplaceAll(out, "]10;", "")
+	out = strings.ReplaceAll(out, "\x07", "")
 	// ST is often a bare trailing backslash after rgb:... was stripped
 	out = strings.Trim(out, " \t\r\n\\")
 	// If almost nothing left but punctuation from probes, drop it
@@ -183,7 +202,8 @@ func hasLetterOrDigit(s string) bool {
 }
 
 func busyTick() tea.Cmd {
-	return tea.Tick(time.Second, func(t time.Time) tea.Msg {
+	// Fast tick so spinner / Thinking… blink while waiting on Ollama or tools.
+	return tea.Tick(200*time.Millisecond, func(t time.Time) tea.Msg {
 		return busyTickMsg(t)
 	})
 }
@@ -210,9 +230,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
 		m.height = msg.Height
-		headerH, helpH := 1, 1
+		headerH, helpH, cwdH, busyH := 1, 1, 1, 4 // busy banner reserved so layout does not jump to blank
 		inputH := m.ta.Height() + 2
-		vpH := msg.Height - headerH - helpH - inputH - 2
+		vpH := msg.Height - headerH - helpH - cwdH - busyH - inputH - 2
 		if vpH < 5 {
 			vpH = 5
 		}
@@ -230,6 +250,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 	case tea.KeyMsg:
+		// Interactive model picker takes priority over normal input.
+		if m.modelPick != nil {
+			return m.handleModelPickKeys(msg)
+		}
 		switch msg.String() {
 		case "esc":
 			// Cancel in-flight generation without quitting the TUI.
@@ -270,9 +294,15 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 	case busyTickMsg:
-		if m.busy && !m.gotToken {
+		if m.busy {
 			m.waitSecs = int(time.Since(m.busySince).Seconds())
-			m.status = fmt.Sprintf("waiting for %s… %ds (Ollama may be loading model; Esc cancel)", m.deps.Agent.Cfg.Model, m.waitSecs)
+			// Always animate while busy — quiet mode may hide tokens, so users still see activity.
+			if !m.gotToken {
+				m.status = fmt.Sprintf("Thinking… %ds · %s (Esc cancel)", m.waitSecs, m.deps.Agent.Cfg.Model)
+			} else if m.status == "" || m.status == "ready" || strings.HasPrefix(m.status, "Thinking") {
+				m.status = fmt.Sprintf("Thinking… %ds · working", m.waitSecs)
+			}
+			m.upsertThinkingPlaceholder()
 			m.refreshViewport()
 			return m, busyTick()
 		}
@@ -286,45 +316,60 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.ensureStream().WriteString(ev.Text)
 			cur := m.stream.String()
 			if m.verbose || !isMostlyToolNoise(cur) {
+				m.clearThinkingPlaceholder()
 				m.upsertStreamingAssistant(cur)
 			} else {
 				// Keep status only; drop any partial tool-JSON bubble.
 				m.dropStreamingAssistant()
+				m.upsertThinkingPlaceholder()
 			}
-			m.status = "streaming…"
+			m.status = fmt.Sprintf("streaming… %s", spinnerFrame())
 			m.refreshViewport()
 		case agent.EventToolStart:
 			m.gotToken = true
 			if m.verbose {
 				m.flushStreamAsLine()
+				m.lines = append(m.lines, chatLine{
+					role: "tool",
+					text: formatToolStart(ev.Tool, ev.Text, true),
+				})
 			} else {
-				// Hide "Let's read…" preambles and raw {"name":"read_file"...} dumps.
+				// Quiet: drop model preambles/JSON; tools only in the status bar (not chat).
 				m.dropStreamIfNoise()
 			}
-			m.lines = append(m.lines, chatLine{
-				role: "tool",
-				text: formatToolStart(ev.Tool, ev.Text, m.verbose),
-			})
-			m.status = "tool: " + ev.Tool
+			m.status = formatToolStart(ev.Tool, ev.Text, false)
+			m.upsertThinkingPlaceholder()
 			m.refreshViewport()
 		case agent.EventToolEnd:
-			m.lines = append(m.lines, chatLine{
-				role: "tool",
-				text: formatToolEnd(ev.Tool, ev.ToolOut, m.verbose),
-			})
+			line := formatToolEnd(ev.Tool, ev.ToolOut, m.verbose)
+			if m.verbose {
+				m.lines = append(m.lines, chatLine{role: "tool", text: line})
+			}
+			// Quiet: only surface unexpected tool errors in chat. Network refusals during
+			// link-check/fetch are summarized in the final report (not one Error block each).
+			if !m.verbose && strings.HasPrefix(strings.TrimSpace(ev.ToolOut), "error:") {
+				if !isBenignToolFailure(ev.Tool, ev.ToolOut) {
+					m.lines = append(m.lines, chatLine{role: "error", text: line})
+				}
+			}
+			m.status = line
+			m.upsertThinkingPlaceholder()
 			m.refreshViewport()
 		case agent.EventStatus:
 			// Status bar only — do not spam the chat transcript.
 			if ev.Text != "" {
 				m.status = ev.Text
 			}
+			m.upsertThinkingPlaceholder()
 			m.refreshViewport()
 		case agent.EventError:
+			m.clearThinkingPlaceholder()
 			m.flushStreamAsLine()
 			m.lines = append(m.lines, chatLine{role: "error", text: ev.Text})
 			m.status = "error"
 			m.refreshViewport()
 		case agent.EventDone:
+			m.clearThinkingPlaceholder()
 			// Final answer: show stream unless it's leftover tool JSON.
 			if m.verbose {
 				m.flushStreamAsLine()
@@ -347,6 +392,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 	case streamClosedMsg:
+		m.clearThinkingPlaceholder()
 		if m.verbose {
 			m.flushStreamAsLine()
 		} else {
@@ -365,15 +411,17 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.refreshViewport()
 	}
 
-	if !m.busy {
+	if !m.busy && m.modelPick == nil {
 		var cmd tea.Cmd
 		m.ta, cmd = m.ta.Update(msg)
 		cmds = append(cmds, cmd)
-		// Drop OSC junk if it landed as "typed" characters.
-		if v := m.ta.Value(); v != "" && (strings.Contains(v, "]11;") || strings.Contains(v, "rgb:") || strings.Contains(v, "\x1b]")) {
-			if cleaned := scrubTerminalGarbage(v); cleaned != v {
-				m.ta.SetValue(cleaned)
-				m.ta.CursorEnd()
+		// Drop OSC / color-query junk if it landed as "typed" characters.
+		if v := m.ta.Value(); v != "" {
+			if looksLikeTerminalGarbage(v) {
+				if cleaned := scrubTerminalGarbage(v); cleaned != v {
+					m.ta.SetValue(cleaned)
+					m.ta.CursorEnd()
+				}
 			}
 		}
 	}
@@ -393,20 +441,33 @@ func (m model) handleSubmit(text string) (tea.Model, tea.Cmd) {
 	m.gotToken = false
 	m.waitSecs = 0
 	m.busySince = time.Now()
-	m.status = fmt.Sprintf("thinking… (%s)", m.deps.Agent.Cfg.Model)
+	m.status = fmt.Sprintf("Thinking… (%s)", m.deps.Agent.Cfg.Model)
+	m.upsertThinkingPlaceholder()
 	m.refreshViewport()
 
 	ctx, cancel := context.WithCancel(context.Background())
 	m.cancel = cancel
-	ch := make(chan agent.Event, 256)
+	ch := make(chan agent.Event, 1024)
 	m.events = ch
 	ag := m.deps.Agent
 
 	go func() {
 		_ = ag.RunUserMessage(ctx, text, func(ev agent.Event) {
+			// Never block the agent forever if the UI falls behind (prevents "hang").
 			select {
 			case ch <- ev:
 			case <-ctx.Done():
+			default:
+				// Buffer full: drop pure tokens; block briefly for control events.
+				if ev.Kind == agent.EventToken {
+					return
+				}
+				select {
+				case ch <- ev:
+				case <-ctx.Done():
+				case <-time.After(2 * time.Second):
+					// last resort: drop so tool loop can continue
+				}
 			}
 		})
 		close(ch)
@@ -532,6 +593,70 @@ func (m model) handleSlash(text string) (tea.Model, tea.Cmd) {
 	case "/compact":
 		m.deps.Agent.CompactHistory()
 		m.lines = append(m.lines, chatLine{role: "system", text: "compacted old tool payloads in history"})
+	case "/plan":
+		if len(parts) < 2 {
+			state := "off"
+			if m.deps.Agent.PlanMode {
+				state = "on"
+			}
+			m.lines = append(m.lines, chatLine{role: "system", text: "plan mode: " + state + "\nusage: /plan on | /plan off"})
+		} else {
+			switch strings.ToLower(parts[1]) {
+			case "on", "true", "1", "enable":
+				m.deps.Agent.PlanMode = true
+				m.lines = append(m.lines, chatLine{role: "system", text: "plan mode ON — outline steps only (no tools). /plan off to implement."})
+			case "off", "false", "0", "disable":
+				m.deps.Agent.PlanMode = false
+				m.lines = append(m.lines, chatLine{role: "system", text: "plan mode OFF — tools available again"})
+			default:
+				m.lines = append(m.lines, chatLine{role: "error", text: "usage: /plan on | /plan off"})
+			}
+		}
+	case "/edit", "/e":
+		prev := m.deps.Agent.LastUserText()
+		if prev == "" {
+			m.lines = append(m.lines, chatLine{role: "error", text: "no previous user message to edit"})
+		} else {
+			_ = m.deps.Agent.PopLastExchange()
+			for len(m.lines) > 0 {
+				r := m.lines[len(m.lines)-1].role
+				if r == "user" || r == "assistant" || r == "tool" || r == "error" || r == "assistant-stream" || r == "thinking" {
+					m.lines = m.lines[:len(m.lines)-1]
+					if r == "user" {
+						break
+					}
+					continue
+				}
+				break
+			}
+			m.ta.SetValue(prev)
+			m.ta.CursorEnd()
+			m.lines = append(m.lines, chatLine{role: "system", text: "edit last prompt in the input box, then Enter to resend (Alt+Enter for newline)"})
+		}
+	case "/copy", "/yank":
+		text := lastAssistantText(m.lines)
+		if text == "" {
+			m.lines = append(m.lines, chatLine{role: "error", text: "no assistant reply to copy"})
+		} else if path, err := copyToClipboardOrFile(text); err != nil {
+			m.lines = append(m.lines, chatLine{role: "error", text: "copy failed: " + err.Error()})
+		} else {
+			m.lines = append(m.lines, chatLine{role: "system", text: "copied last agent reply → " + path})
+		}
+	case "/undo":
+		msg, err := tools.UndoLast()
+		if err != nil {
+			m.lines = append(m.lines, chatLine{role: "error", text: err.Error()})
+		} else {
+			m.lines = append(m.lines, chatLine{role: "system", text: msg})
+		}
+	case "/stop":
+		if m.busy && m.cancel != nil {
+			m.cancel()
+			m.status = "cancelling… (/stop)"
+			m.lines = append(m.lines, chatLine{role: "system", text: "stop requested"})
+		} else {
+			m.lines = append(m.lines, chatLine{role: "system", text: "nothing to stop (not busy)"})
+		}
 	default:
 		m.lines = append(m.lines, chatLine{role: "error", text: "unknown command " + cmd + " — try /help"})
 	}
@@ -539,35 +664,77 @@ func (m model) handleSlash(text string) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+func lastAssistantText(lines []chatLine) string {
+	for i := len(lines) - 1; i >= 0; i-- {
+		if lines[i].role == "assistant" && strings.TrimSpace(lines[i].text) != "" {
+			return lines[i].text
+		}
+	}
+	return ""
+}
+
+// copyToClipboardOrFile tries wl-copy/xclip/pbcopy; always writes ~/.agenterm/last_reply.txt.
+func copyToClipboardOrFile(text string) (string, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", err
+	}
+	dir := filepath.Join(home, ".agenterm")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return "", err
+	}
+	path := filepath.Join(dir, "last_reply.txt")
+	if err := os.WriteFile(path, []byte(text), 0o644); err != nil {
+		return "", err
+	}
+	for _, try := range [][]string{
+		{"wl-copy"},
+		{"xclip", "-selection", "clipboard"},
+		{"xsel", "--clipboard", "--input"},
+		{"pbcopy"},
+	} {
+		if _, err := exec.LookPath(try[0]); err != nil {
+			continue
+		}
+		cmd := exec.Command(try[0], try[1:]...)
+		cmd.Stdin = strings.NewReader(text)
+		if err := cmd.Run(); err == nil {
+			return path + " + clipboard", nil
+		}
+	}
+	return path + " (clipboard tool not found; file only)", nil
+}
+
 func helpText() string {
 	return strings.TrimSpace(`
 Commands:
   /help              This help
   /clear             Clear conversation
-  /status            Provider · model · URL · git short status
-  /model             List models (* = current)
-  /model <name>      Switch model mid-chat
+  /status            Provider · model · URL · workspace path · git
+  /model             Interactive picker (Tab · Enter · Esc)
+  /model <name>      Switch model by name
   /tools on|off      Toggle function tools
-  /quiet | /verbose  Compact vs full tool traces
-  /retry             Regenerate last reply (same user message)
-  /save [id]         Save session to ~/.agenterm/sessions
-  /sessions          List saved sessions
-  /load <id>         Resume a saved session
-  /compact           Shrink old tool payloads in memory
+  /plan on|off       Plan-only mode (no tools)
+  /quiet | /verbose  Compact tools vs full traces
+  /retry             Regenerate last reply
+  /edit              Edit last prompt & resend
+  /copy              Copy last agent reply
+  /undo              Revert last file write/str_replace
+  /stop              Cancel in-flight reply
+  /save [id]         Save session
+  /sessions          List sessions
+  /load <id>         Resume session
+  /compact           Shrink tool history
   /quit              Exit
 
-Mentions (like Cursor/Grok):
-  @README.md         Attach file contents to your message
-  @internal/agent    Attach directory listing
+Mentions: @README.md  @internal/agent
 
-Examples:
-  /model qwen2.5-coder:32b
-  explain @README.md SEO issues
-  /retry
+Tools: repo_map, grep, fetch, git, str_replace, write_file, run_shell, …
 
 Keys:
   Enter           Send
-  Esc             Cancel in-flight reply
+  Alt+Enter       Newline in prompt
+  Esc / /stop     Cancel in-flight reply
   Ctrl+C          Cancel if busy; quit when idle
   Ctrl+L          Clear history
   PgUp / PgDn     Scroll
@@ -578,6 +745,28 @@ func mustCwd() string {
 	c, err := os.Getwd()
 	if err != nil {
 		return "."
+	}
+	return c
+}
+
+// displayCwd returns the process working directory for the TUI (tools use this).
+// Home is shortened to ~; maxW>0 truncates the middle for narrow terminals.
+func displayCwd(maxW int) string {
+	c := mustCwd()
+	if home, err := os.UserHomeDir(); err == nil && home != "" {
+		if c == home {
+			c = "~"
+		} else if strings.HasPrefix(c, home+string(os.PathSeparator)) {
+			c = "~" + c[len(home):]
+		}
+	}
+	if maxW > 12 && len(c) > maxW {
+		// keep head and tail: ~/proj…/agenterm
+		keep := (maxW - 1) / 2
+		if keep < 4 {
+			keep = 4
+		}
+		c = c[:keep] + "…" + c[len(c)-(maxW-keep-1):]
 	}
 	return c
 }
@@ -598,9 +787,11 @@ func runGitStatusShort() (string, error) {
 }
 
 // handleModelCmd implements Grok-style mid-chat model switch and listing.
+// /model or /model list opens an interactive picker: Tab cycles, Enter selects, Esc cancels.
+// /model <name> still switches immediately.
 func (m model) handleModelCmd(parts []string) (model, tea.Cmd) {
 	cur := m.deps.Agent.Cfg.Model
-	// /model  or  /model list  → show available models from the endpoint
+	// /model  or  /model list  → interactive picker
 	if len(parts) < 2 || strings.EqualFold(parts[1], "list") || strings.EqualFold(parts[1], "ls") {
 		ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
 		defer cancel()
@@ -621,24 +812,20 @@ func (m model) handleModelCmd(parts []string) (model, tea.Cmd) {
 			m.refreshViewport()
 			return m, nil
 		}
-		var b strings.Builder
-		b.WriteString("Models at ")
-		b.WriteString(m.deps.Agent.Cfg.BaseURL)
-		b.WriteString("\n")
-		b.WriteString("current: ")
-		b.WriteString(cur)
-		b.WriteString("\n\n")
-		for _, id := range ids {
-			mark := "  "
+		idx := 0
+		for i, id := range ids {
 			if id == cur {
-				mark = "* "
+				idx = i
+				break
 			}
-			b.WriteString(mark)
-			b.WriteString(id)
-			b.WriteByte('\n')
 		}
-		b.WriteString("\nSwitch: /model <name>")
-		m.lines = append(m.lines, chatLine{role: "system", text: strings.TrimRight(b.String(), "\n")})
+		m.modelPick = &modelPicker{ids: ids, idx: idx}
+		m.ta.Blur()
+		m.status = "pick model · Tab next · Enter select · Esc cancel"
+		m.lines = append(m.lines, chatLine{
+			role: "system",
+			text:  fmt.Sprintf("Select a model (%d available)\n  Tab / ↓  next ·  Shift+Tab / ↑  prev ·  Enter  select ·  Esc  cancel\n  Or type: /model <name>", len(ids)),
+		})
 		m.refreshViewport()
 		return m, nil
 	}
@@ -650,7 +837,72 @@ func (m model) handleModelCmd(parts []string) (model, tea.Cmd) {
 		m.refreshViewport()
 		return m, nil
 	}
-	prev := cur
+	return m.applyModelSelection(name), nil
+}
+
+func (m model) handleModelPickKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	p := m.modelPick
+	if p == nil || len(p.ids) == 0 {
+		m.modelPick = nil
+		m.ta.Focus()
+		return m, nil
+	}
+	n := len(p.ids)
+	switch msg.String() {
+	case "esc":
+		m.modelPick = nil
+		m.ta.Focus()
+		m.status = "ready"
+		m.lines = append(m.lines, chatLine{role: "system", text: "model pick cancelled (still: " + m.deps.Agent.Cfg.Model + ")"})
+		m.refreshViewport()
+		return m, nil
+	case "ctrl+c":
+		m.modelPick = nil
+		if m.cancel != nil {
+			m.cancel()
+		}
+		return m, tea.Quit
+	case "tab", "down", "j", "ctrl+n":
+		p.idx = (p.idx + 1) % n
+		m.status = fmt.Sprintf("model pick %d/%d · %s", p.idx+1, n, p.ids[p.idx])
+		return m, nil
+	case "shift+tab", "up", "k", "ctrl+p":
+		p.idx = (p.idx - 1 + n) % n
+		m.status = fmt.Sprintf("model pick %d/%d · %s", p.idx+1, n, p.ids[p.idx])
+		return m, nil
+	case "enter":
+		name := p.ids[p.idx]
+		m.modelPick = nil
+		m.ta.Focus()
+		return m.applyModelSelection(name), nil
+	case "home", "g":
+		p.idx = 0
+		return m, nil
+	case "end", "G":
+		p.idx = n - 1
+		return m, nil
+	default:
+		// Digits 1-9 quick-select first nine models
+		if len(msg.String()) == 1 {
+			ch := msg.String()[0]
+			if ch >= '1' && ch <= '9' {
+				i := int(ch - '1')
+				if i < n {
+					p.idx = i
+					name := p.ids[p.idx]
+					m.modelPick = nil
+					m.ta.Focus()
+					return m.applyModelSelection(name), nil
+				}
+			}
+		}
+		// Ignore other keys while picking (do not type into chat)
+		return m, nil
+	}
+}
+
+func (m model) applyModelSelection(name string) model {
+	prev := m.deps.Agent.Cfg.Model
 	m.deps.Agent.Cfg.Model = name
 	m.deps.Summary = fmt.Sprintf("%s · %s · %s", m.deps.Agent.Cfg.Provider, m.deps.Agent.Cfg.Model, m.deps.Agent.Cfg.BaseURL)
 	m.status = "model: " + name
@@ -667,7 +919,59 @@ func (m model) handleModelCmd(parts []string) (model, tea.Cmd) {
 	}
 	m.lines = append(m.lines, chatLine{role: "system", text: msg})
 	m.refreshViewport()
-	return m, nil
+	return m
+}
+
+// modelPickerView renders the selectable model list for the TUI.
+func (m model) modelPickerView(width int) string {
+	p := m.modelPick
+	if p == nil {
+		return ""
+	}
+	cur := m.deps.Agent.Cfg.Model
+	var b strings.Builder
+	b.WriteString(styleHeader.Render(" Select model ") + styleStatus.Render("Tab cycle · Enter select · Esc cancel"))
+	b.WriteByte('\n')
+	// Show a window of models around the cursor for long lists.
+	const window = 12
+	start := 0
+	if len(p.ids) > window {
+		start = p.idx - window/2
+		if start < 0 {
+			start = 0
+		}
+		if start+window > len(p.ids) {
+			start = len(p.ids) - window
+		}
+	}
+	end := start + window
+	if end > len(p.ids) {
+		end = len(p.ids)
+	}
+	if start > 0 {
+		b.WriteString(styleStatus.Render(fmt.Sprintf("  … %d more above\n", start)))
+	}
+	for i := start; i < end; i++ {
+		id := p.ids[i]
+		line := id
+		if id == cur {
+			line = id + "  (current)"
+		}
+		if i == p.idx {
+			// Highlighted selection
+			b.WriteString(styleAsst.Render("❯ " + line))
+		} else if id == cur {
+			b.WriteString(styleStatus.Render("* " + line))
+		} else {
+			b.WriteString(styleStatus.Render("  " + line))
+		}
+		b.WriteByte('\n')
+	}
+	if end < len(p.ids) {
+		b.WriteString(styleStatus.Render(fmt.Sprintf("  … %d more below\n", len(p.ids)-end)))
+	}
+	b.WriteString(styleHelp.Render(fmt.Sprintf("\n[%d/%d]  %s", p.idx+1, len(p.ids), p.ids[p.idx])))
+	return styleBox.Width(max(10, width-2)).BorderForeground(colorAccent).Render(strings.TrimRight(b.String(), "\n"))
 }
 
 func (m *model) upsertStreamingAssistant(content string) {
@@ -701,14 +1005,105 @@ func (m *model) flushStreamAsLineQuiet() {
 	content := strings.TrimSpace(sb.String())
 	sb.Reset()
 	m.dropStreamingAssistant()
-	if content == "" || isMostlyToolNoise(content) {
+	if content == "" {
 		return
+	}
+	if isMostlyToolNoise(content) {
+		// Tool dumps (incl. long run_shell crawls) never become the final "Agent" answer.
+		if cleaned := stripLeadingToolNoise(content); cleaned != "" && !isMostlyToolNoise(cleaned) {
+			content = cleaned
+		} else {
+			return
+		}
 	}
 	m.lines = append(m.lines, chatLine{role: "assistant", text: content})
 }
 
+// stripLeadingToolNoise removes a leading JSON/tool dump if prose remains after it.
+func stripLeadingToolNoise(s string) string {
+	s = strings.TrimSpace(s)
+	// fenced ```json ... ```
+	if i := strings.Index(s, "```"); i >= 0 && i < 80 {
+		rest := s[i+3:]
+		if j := strings.Index(rest, "```"); j >= 0 {
+			after := strings.TrimSpace(rest[j+3:])
+			if after != "" && !isMostlyToolNoise(after) {
+				return after
+			}
+		}
+	}
+	if i := strings.Index(s, "{"); i >= 0 && i < 120 {
+		// find matching-ish end of first object (best-effort)
+		depth := 0
+		for k := i; k < len(s); k++ {
+			switch s[k] {
+			case '{':
+				depth++
+			case '}':
+				depth--
+				if depth == 0 {
+					after := strings.TrimSpace(s[k+1:])
+					if len(after) > 40 && !isMostlyToolNoise(after) {
+						return after
+					}
+					return ""
+				}
+			}
+		}
+	}
+	return ""
+}
+
 func (m *model) dropStreamingAssistant() {
 	if len(m.lines) > 0 && m.lines[len(m.lines)-1].role == "assistant-stream" {
+		m.lines = m.lines[:len(m.lines)-1]
+	}
+}
+
+// upsertThinkingPlaceholder keeps a blinking "Thinking…" line in the chat while busy
+// so quiet mode (hidden tool JSON) does not look frozen.
+func (m *model) upsertThinkingPlaceholder() {
+	if !m.busy {
+		return
+	}
+	// Real non-empty assistant stream already visible — no placeholder.
+	if len(m.lines) > 0 {
+		last := m.lines[len(m.lines)-1]
+		if (last.role == "assistant-stream" || last.role == "assistant") && strings.TrimSpace(last.text) != "" {
+			return
+		}
+		// Drop empty assistant bubbles that hide Thinking.
+		if (last.role == "assistant-stream" || last.role == "assistant") && strings.TrimSpace(last.text) == "" {
+			m.lines = m.lines[:len(m.lines)-1]
+		}
+	}
+	text := m.busyBannerText()
+	if len(m.lines) > 0 && m.lines[len(m.lines)-1].role == "thinking" {
+		m.lines[len(m.lines)-1].text = text
+		return
+	}
+	m.lines = append(m.lines, chatLine{role: "thinking", text: text})
+}
+
+func (m model) busyBannerText() string {
+	dots := []string{"   ", ".  ", ".. ", "..."}
+	frame := dots[int(time.Now().UnixNano()/2e8)%len(dots)]
+	sec := m.waitSecs
+	if sec < 0 {
+		sec = 0
+	}
+	text := fmt.Sprintf("Thinking%s  %ds  %s", frame, sec, spinnerFrame())
+	st := strings.TrimSpace(m.status)
+	if st != "" && st != "ready" && !strings.HasPrefix(st, "Thinking") {
+		text = fmt.Sprintf("%s\n%s", text, truncate(st, 96))
+	} else if m.deps.Agent != nil && m.deps.Agent.Cfg.Model != "" {
+		text = fmt.Sprintf("%s\nwaiting on %s · Esc cancel", text, m.deps.Agent.Cfg.Model)
+	}
+	return text
+}
+
+func (m *model) clearThinkingPlaceholder() {
+	for len(m.lines) > 0 && m.lines[len(m.lines)-1].role == "thinking" {
 		m.lines = m.lines[:len(m.lines)-1]
 	}
 }
@@ -723,41 +1118,201 @@ func (m *model) dropStreamIfNoise() {
 }
 
 // isMostlyToolNoise detects model dumps of tool-call JSON and short “let me tool” chatter.
+// Must stay conservative: false positives hide real answers (looks like a hung "ready" turn).
 func isMostlyToolNoise(s string) bool {
 	s = strings.TrimSpace(s)
 	if s == "" {
 		return true
 	}
-	// Raw / fenced tool JSON
+	lowAll := strings.ToLower(s)
+
+	// Model dumps tool invocation as chat (any length) — especially run_shell crawls.
+	if looksLikeToolInvocationDump(s, lowAll) {
+		return true
+	}
+
+	// XML / tag-style tool dumps (any length — not user prose)
+	for _, tag := range []string{
+		"<tool_call", "</tool_call>", "<function_call", "<parameter",
+		`"tool_calls"`,
+	} {
+		if strings.Contains(lowAll, tag) {
+			// Long answers after a tool tag still count as noise for live paint;
+			// flushStreamAsLineQuiet will keep long text via stripLeadingToolNoise.
+			if len(s) < 400 || strings.Count(s, "{") >= 1 {
+				return true
+			}
+		}
+	}
+
+	// Tool-shaped JSON is the majority of the message
 	if strings.Contains(s, `"name"`) && (strings.Contains(s, `"arguments"`) || strings.Contains(s, `"parameters"`)) {
-		// If almost the whole message is JSON-ish, hide it.
 		withoutSpace := strings.Map(func(r rune) rune {
 			if r == ' ' || r == '\n' || r == '\t' {
 				return -1
 			}
 			return r
 		}, s)
-		if strings.HasPrefix(withoutSpace, "{") || strings.Contains(s, "```") {
+		if strings.HasPrefix(withoutSpace, "{") || strings.HasPrefix(withoutSpace, "[") {
 			return true
 		}
-		// JSON object is majority of text
 		if i := strings.Index(s, "{"); i >= 0 {
 			jsonPart := s[i:]
 			if len(jsonPart) > len(s)*2/3 {
 				return true
 			}
 		}
+		// Short "Let's read…\n{json}" preambles
+		if len(s) < 350 {
+			return true
+		}
 	}
-	low := strings.ToLower(s)
-	if len(s) < 400 {
+
+	// Almost pure JSON blob (streaming tool args), short only
+	if len(s) < 600 && (strings.HasPrefix(s, "{") || strings.HasPrefix(s, "[")) {
+		if strings.Count(s, `"`) >= 2 && !strings.Contains(s, "\n\n") {
+			return true
+		}
+	}
+
+	// Short tool-intent chatter only — never match long answers (e.g. "I need to…").
+	if len(s) < 160 {
 		for _, p := range []string{
 			"let's read", "lets read", "i'll read", "i will read",
-			"let me read", "reading the", "i'll use", "i will use",
-			"using the read_file", "call read_file", "invoke",
+			"let me read", "i'll use", "i will use",
+			"using the read_file", "call read_file",
+			"let me check", "let me look",
 		} {
-			if strings.Contains(low, p) {
+			if strings.Contains(lowAll, p) {
 				return true
 			}
+		}
+		// Bare "find_files README.md" style tool sketch with no real prose
+		if looksLikeBareToolSketch(lowAll) {
+			return true
+		}
+	}
+	return false
+}
+
+// looksLikeBareToolSketch matches short lines like "find_files README.md" with no sentence.
+func looksLikeBareToolSketch(low string) bool {
+	tools := []string{
+		"find_files", "read_file", "write_file", "str_replace", "list_dir",
+		"run_shell", "run_tests", "grep", "fetch",
+	}
+	for _, t := range tools {
+		if strings.HasPrefix(low, t) || strings.HasPrefix(strings.TrimLeft(low, "`* "), t) {
+			// no multi-sentence prose
+			if !strings.Contains(low, ". ") && len(low) < 120 {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// looksLikeToolInvocationDump matches prose-less tool dumps (often shown as "Agent" answer).
+func looksLikeToolInvocationDump(s, low string) bool {
+	// run_shell {"command": "..."}  or  → run_shell · ...
+	if strings.HasPrefix(low, "run_shell") || strings.HasPrefix(low, "→ run_shell") {
+		return true
+	}
+	if strings.Contains(low, `run_shell`) && strings.Contains(s, `"command"`) {
+		return true
+	}
+	if strings.HasPrefix(low, "fetch ") || strings.HasPrefix(low, "fetch{") || strings.HasPrefix(low, `fetch {`) {
+		return true
+	}
+	// Bare shell pipelines the model pastes instead of calling tools
+	if looksLikeShellOnlyMessage(s, low) {
+		return true
+	}
+	// Markdown fence that is only a shell one-liner
+	trim := strings.TrimSpace(s)
+	if strings.HasPrefix(trim, "```") {
+		body := strings.TrimSpace(strings.TrimPrefix(trim, "```"))
+		for _, lang := range []string{"bash", "sh", "shell", "zsh", "console"} {
+			if strings.HasPrefix(strings.ToLower(body), lang) {
+				body = strings.TrimSpace(body[len(lang):])
+				break
+			}
+		}
+		if strings.Contains(body, "```") {
+			body = strings.TrimSpace(body[:strings.Index(body, "```")])
+		}
+		if looksLikeShellOnlyMessage(body, strings.ToLower(body)) {
+			return true
+		}
+	}
+	return false
+}
+
+// looksLikeShellOnlyMessage is true when the whole reply is a shell recipe, not prose.
+func looksLikeShellOnlyMessage(s, low string) bool {
+	s = strings.TrimSpace(s)
+	low = strings.TrimSpace(low)
+	if s == "" {
+		return true
+	}
+	// multi-paragraph prose → not shell-only
+	if strings.Count(s, "\n\n") >= 1 && len(s) > 200 {
+		// still noise if every non-empty line looks like shell
+		lines := strings.Split(s, "\n")
+		shellLines, textLines := 0, 0
+		for _, ln := range lines {
+			ln = strings.TrimSpace(ln)
+			if ln == "" || strings.HasPrefix(ln, "```") {
+				continue
+			}
+			ll := strings.ToLower(ln)
+			if lineLooksLikeShell(ll) {
+				shellLines++
+			} else if len(ln) > 20 {
+				textLines++
+			}
+		}
+		if shellLines > 0 && textLines == 0 {
+			return true
+		}
+		return false
+	}
+	// single line / short block
+	if lineLooksLikeShell(low) {
+		return true
+	}
+	if strings.Contains(low, "xargs") {
+		return true
+	}
+	if strings.Contains(low, "https?:") && strings.Contains(low, "grep") && strings.Contains(low, "|") {
+		return true
+	}
+	return false
+}
+
+func lineLooksLikeShell(low string) bool {
+	low = strings.TrimSpace(low)
+	if low == "" {
+		return false
+	}
+	// strip leading $ or # shell prompts
+	low = strings.TrimLeft(low, "$ #")
+	low = strings.TrimSpace(low)
+	prefixes := []string{
+		"grep ", "rg ", "find ", "xargs ", "curl ", "wget ", "awk ", "sed ",
+		"find_files", "run_shell", "bash ", "sh ", "make ", "git ",
+	}
+	for _, p := range prefixes {
+		if strings.HasPrefix(low, p) {
+			return true
+		}
+	}
+	// pipeline-heavy without sentence punctuation
+	if strings.Count(low, "|") >= 1 && !strings.Contains(low, ". ") {
+		if strings.Contains(low, "grep") || strings.Contains(low, "xargs") ||
+			strings.Contains(low, "curl") || strings.Contains(low, "wget") ||
+			strings.Contains(low, "sort") {
+			return true
 		}
 	}
 	return false
@@ -772,6 +1327,24 @@ func formatToolStart(name, args string, verbose bool) string {
 		return fmt.Sprintf("→ %s · %s", name, truncate(path, 72))
 	}
 	return fmt.Sprintf("→ %s", name)
+}
+
+// isBenignToolFailure is true for expected network/local failures that should not
+// spam the chat as red Error lines (final link-check report covers them).
+func isBenignToolFailure(tool, out string) bool {
+	low := strings.ToLower(out)
+	if tool == "fetch" {
+		if strings.Contains(low, "connection refused") ||
+			strings.Contains(low, "no such host") ||
+			strings.Contains(low, "i/o timeout") ||
+			strings.Contains(low, "timeout") ||
+			strings.Contains(low, "certificate") ||
+			strings.Contains(low, "tls") ||
+			strings.Contains(low, "eof") {
+			return true
+		}
+	}
+	return false
 }
 
 func formatToolEnd(name, out string, verbose bool) string {
@@ -797,8 +1370,8 @@ func toolArgHint(argsJSON string) string {
 	if argsJSON == "" {
 		return ""
 	}
-	// Prefer "path" then "name" then "command"
-	for _, key := range []string{"path", "name", "root", "command"} {
+	// Prefer useful keys for status bar hints
+	for _, key := range []string{"url", "path", "name", "root", "command", "pattern"} {
 		// cheap extract: "path": "..."
 		needle := `"` + key + `"`
 		i := strings.Index(argsJSON, needle)
@@ -845,6 +1418,9 @@ func (m *model) refreshViewport() {
 				}
 			}
 			b.WriteString(rendered + "\n\n")
+		case "thinking":
+			b.WriteString(styleAsst.Render("Agent") + "\n")
+			b.WriteString(styleStatus.Render(wrap(ln.text, width)) + "\n\n")
 		case "tool":
 			b.WriteString(styleTool.Render("Tool") + "\n")
 			b.WriteString(styleTool.Render(wrap(ln.text, width)) + "\n\n")
@@ -866,7 +1442,7 @@ func (m model) View() string {
 	}
 	header := styleHeader.Render(" agenterm ") + styleStatus.Render(m.deps.Summary)
 	if m.busy {
-		header += styleStatus.Render("  ·  " + m.status + "  " + spinnerFrame())
+		header += styleAsst.Render("  ·  " + truncate(m.status, 60) + "  " + spinnerFrame())
 	} else {
 		header += styleStatus.Render("  ·  " + m.status)
 	}
@@ -874,10 +1450,32 @@ func (m model) View() string {
 	if m.verbose {
 		mode = "verbose"
 	}
-	help := styleHelp.Render("enter send · esc cancel · /" + mode + " · /help · /model · ctrl+l clear")
+	help := styleHelp.Render("enter send · alt+enter newline · esc cancel · /" + mode + " · /help · /model · /plan · ctrl+l")
+	if m.deps.Agent != nil && m.deps.Agent.PlanMode {
+		help = styleHelp.Render("PLAN MODE · enter send · /plan off to use tools · /help")
+	}
+	if m.modelPick != nil {
+		help = styleHelp.Render("Tab / ↓ next · Shift+Tab / ↑ prev · Enter select · Esc cancel · 1-9 quick")
+	}
 	body := styleBox.Width(max(10, w-2)).Render(m.vp.View())
+	// Always paint busy banner above the prompt (independent of chat lines).
+	busyBar := ""
+	if m.busy {
+		busyBar = styleBox.Width(max(10, w-2)).
+			BorderForeground(colorAccent).
+			Render(styleAsst.Render("Agent") + "\n" + styleStatus.Render(m.busyBannerText()))
+	}
+	// Always show workspace path above the prompt so you know where tools write.
+	cwdLine := styleHelp.Render("cwd  " + displayCwd(max(20, w-8)))
 	input := styleBox.Width(max(10, w-2)).Render(m.ta.View())
-	return lipgloss.JoinVertical(lipgloss.Left, header, body, input, help)
+	if m.modelPick != nil {
+		pick := m.modelPickerView(w)
+		return lipgloss.JoinVertical(lipgloss.Left, header, body, pick, cwdLine, help)
+	}
+	if busyBar != "" {
+		return lipgloss.JoinVertical(lipgloss.Left, header, body, busyBar, cwdLine, input, help)
+	}
+	return lipgloss.JoinVertical(lipgloss.Left, header, body, cwdLine, input, help)
 }
 
 func wrap(s string, width int) string {

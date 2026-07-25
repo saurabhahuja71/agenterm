@@ -125,8 +125,11 @@ func parseOneToolJSON(raw string, knownTools map[string]struct{}) (llm.ToolCall,
 		name = "grep"
 	case "run_tests", "test", "tests":
 		name = "run_tests"
-	case "shell", "bash", "run":
+	case "shell", "bash", "run", "run_shell", "execute", "exec", "curl", "wget":
+		// curl/wget as tool names → run_shell (command filled below if only url given)
 		name = "run_shell"
+	case "fetch", "http_get", "httpget", "download":
+		name = "fetch"
 	}
 	if _, ok := knownTools[name]; !ok {
 		return llm.ToolCall{}, false
@@ -145,6 +148,10 @@ func parseOneToolJSON(raw string, knownTools map[string]struct{}) (llm.ToolCall,
 		b, _ := json.Marshal(map[string]string{"path": t.Path})
 		args = string(b)
 	}
+	// curl/wget-style calls often pass url without wrapping a bash command
+	if name == "run_shell" || name == "fetch" {
+		args = normalizeFetchOrShellArgs(name, args, t)
+	}
 	// Must look like JSON object for tool runners
 	if !json.Valid([]byte(args)) {
 		// wrap as path-only if bare string path
@@ -161,6 +168,58 @@ func parseOneToolJSON(raw string, knownTools map[string]struct{}) (llm.ToolCall,
 			Arguments: args,
 		},
 	}, true
+}
+
+// normalizeFetchOrShellArgs fills command/url when models emit curl/wget-shaped JSON.
+func normalizeFetchOrShellArgs(name, args string, t textToolCall) string {
+	var m map[string]any
+	if err := json.Unmarshal([]byte(args), &m); err != nil || m == nil {
+		m = map[string]any{}
+	}
+	str := func(keys ...string) string {
+		for _, k := range keys {
+			if v, ok := m[k]; ok {
+				switch x := v.(type) {
+				case string:
+					if strings.TrimSpace(x) != "" {
+						return strings.TrimSpace(x)
+					}
+				}
+			}
+		}
+		return ""
+	}
+	url := str("url", "URL", "uri", "href")
+	if url == "" && strings.HasPrefix(strings.TrimSpace(t.Path), "http") {
+		url = strings.TrimSpace(t.Path)
+	}
+	cmd := str("command", "cmd", "script")
+
+	switch name {
+	case "fetch":
+		if str("url") == "" && url != "" {
+			m["url"] = url
+			b, _ := json.Marshal(m)
+			return string(b)
+		}
+	case "run_shell":
+		if cmd == "" && url != "" {
+			// Prefer curl; fall back to wget if someone only has that (runtime).
+			quoted := "'" + strings.ReplaceAll(url, "'", `'\''`) + "'"
+			m["command"] = "curl -fsSL " + quoted + " || wget -qO- " + quoted
+			b, _ := json.Marshal(m)
+			return string(b)
+		}
+		// Bare script path: "script.sh" without command key
+		if cmd == "" {
+			if p := str("path", "file", "script_path"); p != "" && strings.HasSuffix(p, ".sh") {
+				m["command"] = "bash " + p
+				b, _ := json.Marshal(m)
+				return string(b)
+			}
+		}
+	}
+	return args
 }
 
 func firstNonEmpty(ss ...string) string {

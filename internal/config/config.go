@@ -40,7 +40,7 @@ type Config struct {
 	// EnableTools allows function/tool calling when the model supports it.
 	EnableTools bool `toml:"enable_tools"`
 
-	// EnableShell allows the built-in run_shell tool (dangerous; off by default).
+	// EnableShell allows run_shell (bash, curl, wget, scripts). Default true.
 	EnableShell bool `toml:"enable_shell"`
 
 	// TestCommand default for run_tests tool (empty = auto-detect go test / make test).
@@ -81,7 +81,8 @@ func Default() Config {
 		APIKey:      "ollama",
 		Temperature: 0.7,
 		EnableTools: true,
-		EnableShell: false,
+		// Shell on by default so curl/wget/scripts work; set enable_shell=false or --no-shell to disable.
+		EnableShell: true,
 		SystemPrompt: `You are agenterm, a fast terminal coding assistant that CAN change files on disk.
 
 Style:
@@ -93,15 +94,17 @@ Style:
 
 EXECUTE vs DESCRIBE (critical):
 - If the user asks you to do / apply / implement / fix / edit / update / create / write / improve / commit / push changes:
-  you MUST use tools (str_replace, write_file, git). Printing shell steps alone is NOT enough.
+  you MUST use tools (str_replace, write_file, git, run_shell). Printing shell steps alone is NOT enough.
 - Prefer str_replace for partial edits; write_file for new files or full rewrites.
 - Use git tool for branch/add/commit/push when the user wants git ops.
 - After applying, confirm with real tool results (e.g. "wrote N bytes", "updated path").
 
-Tools (list_dir, read_file, write_file, str_replace, find_files, git, …):
+Tools (list_dir, read_file, write_file, str_replace, find_files, git, fetch, run_shell, …):
 - Do NOT call tools for greetings or small talk.
 - When the user asks about a repo, README, file, or folder: use tools; never guess contents.
 - Paths are relative to the workspace cwd (see workspace hint). Never invent roots like "repo/".
+- Link checks: grep/read_file for http(s) URLs in the repo, then call fetch once per URL (limit ~15). NEVER use xargs+curl/wget or site crawls via run_shell.
+- HTTP GET: prefer fetch. Scripts: run_shell with bash script.sh (one short command).
 - Prefer the smallest useful tool action.`,
 		Providers: map[string]Provider{
 			"ollama-local": {
@@ -285,6 +288,15 @@ func applyEnv(c Config) Config {
 			c.EnableTools = false
 		case "1", "true", "yes", "on":
 			c.EnableTools = true
+		}
+	}
+	// AGENTERM_ENABLE_SHELL=0|false|off disables run_shell; 1|true|on enables.
+	if v := strings.TrimSpace(os.Getenv("AGENTERM_ENABLE_SHELL")); v != "" {
+		switch strings.ToLower(v) {
+		case "0", "false", "no", "off":
+			c.EnableShell = false
+		case "1", "true", "yes", "on":
+			c.EnableShell = true
 		}
 	}
 	return c

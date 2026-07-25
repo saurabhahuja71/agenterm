@@ -25,7 +25,8 @@ max_tokens = 0
 # Tool calling (list_dir, read_file, find_files, …). Greetings never attach tools.
 # Set false or run: agenterm --no-tools   for pure chat speed.
 enable_tools = true
-enable_shell = false
+# bash/curl/wget/scripts via run_shell (set false or use --no-shell to disable)
+enable_shell = true
 # Default for run_tests tool (empty = auto: go test ./... | make test)
 # test_command = "go test ./..."
 

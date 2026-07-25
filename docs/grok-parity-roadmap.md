@@ -225,7 +225,7 @@ You will not match **hosted Grok** by only polishing the TUI.
 17. Vision — **todo**  
 18. Voice — **todo**  
 
-### v0.2.0 shipped (this batch)
+### v0.2.0 shipped
 
 | Feature | How to use |
 |---------|------------|
@@ -237,6 +237,20 @@ You will not match **hosted Grok** by only polishing the TUI.
 | `/compact` | shrink tool history |
 | `AGENTS.md` | auto-loaded into system prompt |
 | Project root | shown in workspace hint |
+
+### v0.3.0 shipped (Grok-like UX batch)
+
+| Feature | How to use |
+|---------|------------|
+| Multi-line prompt | **Alt+Enter** newline; Enter sends |
+| `/plan on\|off` | Plan-only (no tools), then implement |
+| `/edit` | Edit last user prompt & resend |
+| `/copy` | Last agent reply → clipboard + `~/.agenterm/last_reply.txt` |
+| `/undo` | Revert last `write_file` / `str_replace` |
+| `/stop` | Cancel generation |
+| `repo_map` tool | Compact project tree |
+| Link check | Built-in grep+fetch report (skips localhost / `$VAR`) |
+| `/model` picker | Tab / Enter / Esc |
 
 ---
 

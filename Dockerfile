@@ -3,7 +3,7 @@
 FROM docker.io/library/golang:1.25-alpine AS build
 WORKDIR /src
 
-ARG VERSION=0.1.0
+ARG VERSION=0.3.0
 
 RUN apk add --no-cache git ca-certificates
 ENV GOTOOLCHAIN=local CGO_ENABLED=0

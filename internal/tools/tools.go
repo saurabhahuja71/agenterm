@@ -4,10 +4,13 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/saurabhahuja71/agenterm/internal/llm"
@@ -176,12 +179,19 @@ func (writeFile) Run(_ context.Context, argsJSON string) (string, error) {
 	if in.Path == "" {
 		return "", fmt.Errorf("path required")
 	}
+	// Snapshot for /undo
+	prev, err := os.ReadFile(in.Path)
+	created := err != nil
+	if created {
+		prev = nil
+	}
 	if err := os.MkdirAll(filepath.Dir(in.Path), 0o755); err != nil {
 		return "", err
 	}
 	if err := os.WriteFile(in.Path, []byte(in.Content), 0o644); err != nil {
 		return "", err
 	}
+	PushUndo(in.Path, prev, created, "write_file")
 	return fmt.Sprintf("wrote %d bytes to %s", len(in.Content), in.Path), nil
 }
 
@@ -243,6 +253,7 @@ func (strReplace) Run(_ context.Context, argsJSON string) (string, error) {
 	if err := os.WriteFile(path, []byte(next), 0o644); err != nil {
 		return "", err
 	}
+	PushUndo(path, data, false, "str_replace")
 	n := 1
 	if in.ReplaceAll {
 		n = count
@@ -452,14 +463,20 @@ type runShell struct{}
 
 func (runShell) Name() string { return "run_shell" }
 func (runShell) Description() string {
-	return "Run a shell command (bash -lc). Use carefully."
+	return "Run ONE short bash command (scripts, make, single curl/wget URL, tests). " +
+		"Timeout 25s; process group is killed on timeout. " +
+		"Do NOT crawl sites or check many links via xargs/find+curl — use the fetch tool on explicit URLs from repo files. " +
+		"Prefer fetch for HTTP GET; prefer read_file/str_replace for file work."
 }
 func (runShell) Schema() map[string]any {
 	return map[string]any{
 		"type":     "object",
 		"required": []string{"command"},
 		"properties": map[string]any{
-			"command": map[string]any{"type": "string"},
+			"command": map[string]any{
+				"type":        "string",
+				"description": "One short command, e.g. 'make test', 'bash scripts/foo.sh', 'curl -fsSIL https://example.com' (single URL only)",
+			},
 		},
 	}
 }
@@ -470,18 +487,161 @@ func (runShell) Run(ctx context.Context, argsJSON string) (string, error) {
 	if err := json.Unmarshal([]byte(argsJSON), &in); err != nil || strings.TrimSpace(in.Command) == "" {
 		return "", fmt.Errorf("command required")
 	}
-	ctx, cancel := context.WithTimeout(ctx, 60*time.Second)
+	cmdStr := strings.TrimSpace(in.Command)
+	if reason := shellCommandBlocked(cmdStr); reason != "" {
+		return "error: " + reason, nil
+	}
+	// Short timeout + kill whole process group (xargs/curl children included).
+	const shellTimeout = 25 * time.Second
+	ctx, cancel := context.WithTimeout(ctx, shellTimeout)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, "bash", "-lc", in.Command)
+	cmd := exec.CommandContext(ctx, "bash", "-lc", cmdStr)
+	cmd.Env = os.Environ()
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	// Extra kill of process group when context ends (CommandContext only kills bash).
+	go func() {
+		<-ctx.Done()
+		if cmd.Process != nil {
+			_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+		}
+	}()
 	out, err := cmd.CombinedOutput()
 	s := string(out)
 	if len(s) > 50_000 {
 		s = s[:50_000] + "\n…[truncated]…"
 	}
 	if err != nil {
+		if ctx.Err() == context.DeadlineExceeded {
+			return fmt.Sprintf("%s\n[timeout after %s — process group killed]", s, shellTimeout), nil
+		}
 		return fmt.Sprintf("%s\n[exit error: %v]", s, err), nil
 	}
 	return s, nil
+}
+
+// ShellCommandBlocked rejects mass crawls / infinite jobs that freeze the agent.
+// Exported so the agent can refuse recovered shell dumps without running them.
+func ShellCommandBlocked(cmd string) string {
+	return shellCommandBlocked(cmd)
+}
+
+func shellCommandBlocked(cmd string) string {
+	low := strings.ToLower(cmd)
+	// Any xargs over the tree is a hang risk (curl, grep, etc.)
+	if strings.Contains(low, "xargs") {
+		return "blocked xargs pipeline. Use the grep tool (pattern) and fetch tool (one URL at a time), not shell xargs."
+	}
+	if strings.Contains(low, "wget") && (strings.Contains(low, " -r") || strings.Contains(low, "--recursive") || strings.Contains(low, "-mirror")) {
+		return "blocked recursive wget"
+	}
+	if strings.Contains(low, "while true") || strings.Contains(low, "while :") || strings.Contains(low, "while :;") {
+		return "blocked infinite loop"
+	}
+	// Huge pipelines that scrape every href
+	if (strings.Contains(low, "grep -op") || strings.Contains(low, "grep -o") || strings.Contains(low, "href=")) &&
+		(strings.Contains(low, "curl") || strings.Contains(low, "wget")) &&
+		(strings.Contains(low, "while read") || strings.Contains(low, "for ")) {
+		return "blocked link-scrape pipeline. Use grep to list URLs, then fetch tool on each (limit count)."
+	}
+	// Multi-stage grep over whole tree for URL harvest — use built-in grep tool
+	if strings.Count(low, "grep") >= 2 && strings.Contains(low, "https") {
+		return "blocked multi-grep URL harvest. Use the grep tool with pattern https?:// then fetch each URL."
+	}
+	if strings.Contains(low, "grep") && (strings.Contains(low, "https?:") || strings.Contains(low, `https?://`)) &&
+		(strings.Contains(low, " | ") || strings.Contains(low, "|")) {
+		return "blocked shell URL pipeline. Use grep tool + fetch tool instead of shell pipes."
+	}
+	// Too many sequential curls in one command
+	if n := strings.Count(low, "curl "); n > 3 {
+		return "blocked: too many curl invocations in one command — use fetch tool per URL"
+	}
+	if n := strings.Count(low, "wget "); n > 3 {
+		return "blocked: too many wget invocations in one command — use fetch tool per URL"
+	}
+	if len(cmd) > 4000 {
+		return "blocked: command too long"
+	}
+	return ""
+}
+
+// fetchURL is a safe-ish HTTP GET (curl/wget substitute without full shell).
+type fetchURL struct{}
+
+func (fetchURL) Name() string { return "fetch" }
+func (fetchURL) Description() string {
+	return "HTTP GET a URL and return response body (like curl -fsSL / wget -qO-). " +
+		"Use for APIs and downloads of text; for complex curl flags use run_shell."
+}
+func (fetchURL) Schema() map[string]any {
+	return map[string]any{
+		"type":     "object",
+		"required": []string{"url"},
+		"properties": map[string]any{
+			"url": map[string]any{
+				"type":        "string",
+				"description": "http:// or https:// URL",
+			},
+			"timeout_sec": map[string]any{
+				"type":        "integer",
+				"description": "Timeout seconds (default 30, max 120)",
+			},
+		},
+	}
+}
+func (fetchURL) Run(ctx context.Context, argsJSON string) (string, error) {
+	var in struct {
+		URL        string `json:"url"`
+		TimeoutSec int    `json:"timeout_sec"`
+	}
+	if err := json.Unmarshal([]byte(argsJSON), &in); err != nil || strings.TrimSpace(in.URL) == "" {
+		return "", fmt.Errorf("url required")
+	}
+	u := strings.TrimSpace(in.URL)
+	if !strings.HasPrefix(u, "http://") && !strings.HasPrefix(u, "https://") {
+		return "", fmt.Errorf("url must start with http:// or https://")
+	}
+	sec := in.TimeoutSec
+	if sec <= 0 {
+		sec = 12
+	}
+	if sec > 30 {
+		sec = 30
+	}
+	ctx, cancel := context.WithTimeout(ctx, time.Duration(sec)*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("User-Agent", "agenterm-fetch/0.2")
+	client := &http.Client{
+		Timeout: time.Duration(sec) * time.Second,
+		// Don't follow endless redirect chains
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			if len(via) >= 5 {
+				return fmt.Errorf("stopped after 5 redirects")
+			}
+			return nil
+		},
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return fmt.Sprintf("error: fetch failed: %v", err), nil
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 100_000))
+	if err != nil {
+		return fmt.Sprintf("error: read body: %v", err), nil
+	}
+	s := string(body)
+	if len(body) >= 100_000 {
+		s += "\n…[truncated at 100KB]…"
+	}
+	// Keep responses small so link-check loops do not blow context.
+	if len(s) > 8_000 {
+		s = s[:8_000] + "\n…[truncated for chat]…"
+	}
+	return fmt.Sprintf("HTTP %d %s\n\n%s", resp.StatusCode, resp.Status, s), nil
 }
 
 type findFiles struct{}
@@ -659,6 +819,9 @@ func DefaultBuiltinsOpts(opts BuiltinOpts) *Registry {
 	r.Register(grepTool{})
 	r.Register(gitCmd{})
 	r.Register(runTests{DefaultCmd: opts.TestCommand})
+	r.Register(fetchURL{}) // always on — curl/wget substitute for HTTP GET
+	r.Register(repoMap{})  // compact project tree (Grok/Cursor-style overview)
+	// Shell: default on (curl, wget, bash scripts). Disable with EnableShell=false / --no-shell.
 	if opts.EnableShell {
 		r.Register(runShell{})
 	}

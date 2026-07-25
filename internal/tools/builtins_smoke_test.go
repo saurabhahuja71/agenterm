@@ -35,6 +35,22 @@ func TestBuiltinsBasic(t *testing.T) {
 	if err != nil || !strings.Contains(out, "agenterm") {
 		t.Fatalf("resolve repo/README: %v %q", err, trunc(out, 80))
 	}
+	// fetch is always registered
+	out, err = r.Run(context.Background(), "fetch", `{"url":"https://example.com","timeout_sec":15}`)
+	if err != nil || !strings.Contains(out, "HTTP") {
+		t.Fatalf("fetch: %v %q", err, trunc(out, 120))
+	}
+	// shell optional registry
+	rs := DefaultBuiltins(true)
+	out, err = rs.Run(context.Background(), "run_shell", `{"command":"echo shell-ok && true"}`)
+	if err != nil || !strings.Contains(out, "shell-ok") {
+		t.Fatalf("run_shell: %v %q", err, out)
+	}
+	// Mass link crawl must be blocked (was freezing the TUI).
+	out, err = rs.Run(context.Background(), "run_shell", `{"command":"wget -qO- https://example.com | grep href | xargs -n1 curl -I"}`)
+	if err != nil || !strings.Contains(out, "blocked") {
+		t.Fatalf("expected blocked crawl, got %v %q", err, out)
+	}
 }
 
 func findModuleRoot(t *testing.T) string {
