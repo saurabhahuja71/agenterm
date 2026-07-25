@@ -52,15 +52,17 @@ type model struct {
 	lines      []chatLine
 	width      int
 	height     int
-	busy       bool
-	status     string
-	stream     strings.Builder
-	renderer   *glamour.TermRenderer
-	cancel     context.CancelFunc
-	events     <-chan agent.Event
-	busySince  time.Time
-	gotToken   bool
-	waitSecs   int
+	busy      bool
+	status    string
+	// stream accumulates assistant tokens. Must be a pointer: Bubble Tea
+	// copies model by value; a non-empty strings.Builder must not be copied.
+	stream    *strings.Builder
+	renderer  *glamour.TermRenderer
+	cancel    context.CancelFunc
+	events    <-chan agent.Event
+	busySince time.Time
+	gotToken  bool
+	waitSecs  int
 }
 
 type streamEvMsg agent.Event
@@ -92,6 +94,7 @@ func New(deps Deps) model {
 		vp:       vp,
 		ta:       ta,
 		status:   "ready",
+		stream:   &strings.Builder{},
 		renderer: r,
 		lines: []chatLine{
 			{role: "system", text: "agenterm — snappy terminal agent (Ollama / OpenAI-compatible + MCP)"},
@@ -101,6 +104,13 @@ func New(deps Deps) model {
 	}
 	m.refreshViewport()
 	return m
+}
+
+func (m *model) ensureStream() *strings.Builder {
+	if m.stream == nil {
+		m.stream = &strings.Builder{}
+	}
+	return m.stream
 }
 
 func (m model) Init() tea.Cmd {
@@ -190,7 +200,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		switch ev.Kind {
 		case agent.EventToken:
 			m.gotToken = true
-			m.stream.WriteString(ev.Text)
+			m.ensureStream().WriteString(ev.Text)
 			m.upsertStreamingAssistant(m.stream.String())
 			m.status = "streaming…"
 			m.refreshViewport()
@@ -262,7 +272,7 @@ func (m model) handleSubmit(text string) (tea.Model, tea.Cmd) {
 		return m, cmd
 	}
 	m.lines = append(m.lines, chatLine{role: "user", text: text})
-	m.stream.Reset()
+	m.ensureStream().Reset()
 	m.busy = true
 	m.gotToken = false
 	m.waitSecs = 0
@@ -455,14 +465,15 @@ func (m *model) upsertStreamingAssistant(content string) {
 }
 
 func (m *model) flushStreamAsLine() {
-	if m.stream.Len() == 0 {
+	sb := m.ensureStream()
+	if sb.Len() == 0 {
 		if len(m.lines) > 0 && m.lines[len(m.lines)-1].role == "assistant-stream" {
 			m.lines[len(m.lines)-1].role = "assistant"
 		}
 		return
 	}
-	content := m.stream.String()
-	m.stream.Reset()
+	content := sb.String()
+	sb.Reset()
 	if len(m.lines) > 0 && m.lines[len(m.lines)-1].role == "assistant-stream" {
 		m.lines[len(m.lines)-1] = chatLine{role: "assistant", text: content}
 		return
