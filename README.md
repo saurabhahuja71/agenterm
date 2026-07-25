@@ -269,6 +269,101 @@ configs/config.example.toml
 
 ---
 
+## Tech stack (for contributors & curious users)
+
+This section explains **what agenterm is written in** and how the pieces fit together.
+
+### Core language
+
+| Piece | Tech |
+|--------|------|
+| **Language** | **Go** (Golang) |
+| **Module** | `github.com/saurabhahuja71/agenterm` |
+| **Entry point** | `cmd/agenterm/main.go` → single binary `agenterm` |
+| **Go version** | 1.25.x in CI / Docker builds |
+
+agenterm is a **compiled CLI**. There is **no Python/Node runtime** required to run the released binary. Users download a release asset, `go install`, or run a container.
+
+### Major libraries
+
+| Layer | Library | Role |
+|--------|---------|------|
+| **CLI flags / subcommands** | [Cobra](https://github.com/spf13/cobra) | `agenterm`, `init`, `--model`, `--ping`, … |
+| **Config** | [BurntSushi/toml](https://github.com/BurntSushi/toml) | `~/.agenterm/config.toml` |
+| **Terminal UI** | [Bubble Tea](https://github.com/charmbracelet/bubbletea) + [Bubbles](https://github.com/charmbracelet/bubbles) + [Lip Gloss](https://github.com/charmbracelet/lipgloss) | Full-screen TUI (scrollback, input, status) |
+| **Markdown rendering** | [Glamour](https://github.com/charmbracelet/glamour) | Pretty-print assistant replies |
+| **LLM HTTP client** | Custom (`internal/llm`) | OpenAI-compatible `POST /v1/chat/completions` with SSE streaming |
+| **MCP** | [official Go MCP SDK](https://github.com/modelcontextprotocol/go-sdk) | Connect to MCP servers (HTTP streamable or stdio) |
+| **Built-in tools** | Go standard library (`os`, `os/exec`, …) | `list_dir`, `read_file`, `write_file`, optional `run_shell` |
+
+### Architecture
+
+```
+┌─────────────────────────────────────┐
+│  TUI (Bubble Tea / Lip Gloss)       │  ← terminal UI
+└─────────────────┬───────────────────┘
+                  │
+┌─────────────────▼───────────────────┐
+│  Agent loop (internal/agent)        │  ← chat history + tool rounds
+└─────────────┬───────────┬───────────┘
+              │           │
+              ▼           ▼
+     LLM client      Tools registry
+  (OpenAI-compat)    + MCP client
+              │
+              ▼
+   Ollama / xAI / OpenAI / any /v1 API
+```
+
+| Package | Responsibility |
+|---------|----------------|
+| `internal/tui` | Screen, input, streaming tokens, `/help` |
+| `internal/agent` | User message → model → tools → model again |
+| `internal/llm` | HTTP to chat APIs (stream + `tool_calls`) |
+| `internal/config` | Providers, base URL, model, MCP list |
+| `internal/tools` | Built-in tools |
+| `internal/mcp` | External MCP servers exposed as tools |
+
+**Important:** chat **replies** come from the **LLM**. MCP only provides **tools** the model may call. agenterm is an **MCP client**; projects like [mcp-demo](https://github.com/saurabhahuja71/mcp-demo) are **MCP servers**.
+
+### External systems (not embedded in the binary)
+
+| System | How agenterm talks to it |
+|--------|---------------------------|
+| **Ollama** (local or remote) | OpenAI-compatible HTTP, e.g. `http://127.0.0.1:11434/v1` |
+| **xAI / OpenAI / vLLM / …** | Same `/v1/chat/completions` style API |
+| **MCP servers** | MCP over **stdio** or **streamable HTTP** |
+
+Models are **not** shipped inside the binary. The binary is only: **UI + agent loop + HTTP client + tools/MCP**.
+
+### Packaging & DevOps
+
+| Concern | Tech |
+|---------|------|
+| **Native install** | Static Go binary (linux / darwin / windows × amd64 / arm64) |
+| **Container** | Multi-stage **Dockerfile** (`golang` builder → `alpine`) |
+| **Compose** | `docker-compose.yml` (Podman-compatible) |
+| **CI/CD** | **GitHub Actions** (`.github/workflows/release.yml`) |
+| **Artifacts** | GitHub **Releases** + **GHCR** (`ghcr.io/saurabhahuja71/agenterm`) |
+| **Build helpers** | `Makefile`, `scripts/install.sh`, `scripts/run-podman.sh` |
+
+### How this compares to related demos
+
+| Project | Stack |
+|---------|--------|
+| [reactapp](https://github.com/saurabhahuja71/reactapp) | React + FastAPI (Python) + Postgres |
+| [react-java-todo](https://github.com/saurabhahuja71/react-java-todo) | React + Spring Boot (Java) + Postgres |
+| [mcp-demo](https://github.com/saurabhahuja71/mcp-demo) | **Go MCP server** |
+| **agenterm** (this repo) | **Go MCP client + TUI + LLM agent** |
+
+### One-line summary
+
+> **agenterm is a Go terminal application** that uses a **Bubble Tea TUI**, calls **OpenAI-compatible LLM APIs** (especially Ollama), runs an **agent tool loop**, and can load extra tools via **MCP**—distributed as **static binaries** and a **Docker/Podman image**.
+
+See also [`docs/how-it-works.md`](docs/how-it-works.md) for request flow details.
+
+---
+
 ## Notes
 
 - Ollama must expose the **OpenAI-compatible** API (`/v1/chat/completions`). Current Ollama does this by default.
