@@ -138,7 +138,8 @@ func (readFile) Run(_ context.Context, argsJSON string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	const max = 80_000
+	// Keep reads useful but not so large that models re-dump them into chat.
+	const max = 24_000
 	if len(data) > max {
 		return string(data[:max]) + "\n…[truncated]…", nil
 	}
