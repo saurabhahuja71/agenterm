@@ -79,8 +79,15 @@ func Default() Config {
 		EnableTools: true,
 		EnableShell: false,
 		SystemPrompt: `You are agenterm, a fast terminal coding assistant.
-Be concise and practical. Use tools when they help.
-When using tools, prefer the smallest useful action.`,
+Be concise and practical.
+
+Tools (list_dir, read_file, write_file, …):
+- Do NOT call tools for greetings, small talk, thanks, or simple Q&A.
+- Answer "hi", "hello", "how are you", and similar in plain text only.
+- Use tools only when the user asks to inspect, create, or change files/directories,
+  or clearly needs live workspace context you cannot know without looking.
+- Prefer the smallest useful tool action. Never invent tool JSON in chat text;
+  use the API tool-calling interface only.`,
 		Providers: map[string]Provider{
 			"ollama-local": {
 				BaseURL: "http://127.0.0.1:11434/v1",
@@ -255,6 +262,15 @@ func applyEnv(c Config) Config {
 	}
 	if v := firstEnv("AGENTERM_API_KEY", "OLLAMA_API_KEY", "XAI_API_KEY", "OPENAI_API_KEY"); v != "" {
 		c.APIKey = v
+	}
+	// AGENTERM_ENABLE_TOOLS=0|false|off disables tools; 1|true|on enables.
+	if v := strings.TrimSpace(os.Getenv("AGENTERM_ENABLE_TOOLS")); v != "" {
+		switch strings.ToLower(v) {
+		case "0", "false", "no", "off":
+			c.EnableTools = false
+		case "1", "true", "yes", "on":
+			c.EnableTools = true
+		}
 	}
 	return c
 }

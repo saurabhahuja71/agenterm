@@ -71,9 +71,15 @@ func (a *Agent) Reset() {
 func (a *Agent) RunUserMessage(ctx context.Context, user string, emit func(Event)) error {
 	a.History = append(a.History, llm.Message{Role: llm.RoleUser, Content: user})
 
+	// Attach tools only when enabled and the turn is not pure small-talk.
+	// Skipping tools for greetings avoids a pointless second LLM round-trip
+	// (common with Ollama models that eagerly call list_dir on "hi").
 	var toolSchemas []llm.Tool
-	if a.Cfg.EnableTools && a.Tools != nil {
+	attachTools := a.Cfg.EnableTools && a.Tools != nil && !isTrivialChat(user)
+	if attachTools {
 		toolSchemas = a.Tools.LLMTools()
+	} else if a.Cfg.EnableTools && a.Tools != nil && isTrivialChat(user) {
+		emit(Event{Kind: EventStatus, Text: "tools skipped (chat-only turn)"})
 	}
 
 	for round := 0; round < a.MaxToolRounds; round++ {
@@ -82,6 +88,10 @@ func (a *Agent) RunUserMessage(ctx context.Context, user string, emit func(Event
 			Messages:    a.History,
 			Temperature: a.Cfg.Temperature,
 			MaxTokens:   a.Cfg.MaxTokens,
+		}
+		// After a tool result, re-enable tools so multi-step work continues.
+		if round > 0 && a.Cfg.EnableTools && a.Tools != nil {
+			toolSchemas = a.Tools.LLMTools()
 		}
 		if len(toolSchemas) > 0 {
 			req.Tools = toolSchemas
@@ -138,4 +148,60 @@ func (s *streamBridge) OnToolCallDelta(index int, tc llm.ToolCall) {
 	// optional: show streaming tool assembly
 	_ = index
 	_ = tc
+}
+
+// isTrivialChat is true for short greetings / small-talk that should not
+// trigger tool schemas (faster first reply over Ollama, local or tunneled).
+func isTrivialChat(user string) bool {
+	s := strings.TrimSpace(strings.ToLower(user))
+	if s == "" {
+		return false
+	}
+	// Strip common punctuation for matching.
+	s = strings.Map(func(r rune) rune {
+		switch r {
+		case '!', '?', '.', ',', ';', ':', '"', '\'':
+			return -1
+		default:
+			return r
+		}
+	}, s)
+	s = strings.Join(strings.Fields(s), " ")
+	if len(s) > 48 {
+		return false
+	}
+	// Paths / shell-ish → not trivial.
+	if strings.ContainsAny(s, "/\\") {
+		return false
+	}
+	for _, needle := range []string{
+		"list ", "read ", "write ", "create ", "delete ", "open ", "show ",
+		"file", "dir", "folder", "code", "repo", "path", "run ", "exec",
+		"cd ", "ls ", "cat ", "grep", "find ", "fix", "function", "bug",
+		"error", "fix", "implement", "refactor", "debug",
+	} {
+		if strings.Contains(s, needle) {
+			return false
+		}
+	}
+	switch s {
+	case "hi", "hello", "hey", "yo", "sup", "howdy", "hola",
+		"hi there", "hello there", "hey there",
+		"good morning", "good afternoon", "good evening", "good night",
+		"thanks", "thank you", "thx", "ty",
+		"ok", "okay", "k", "cool", "nice", "great",
+		"bye", "goodbye", "see you", "cya",
+		"how are you", "how r you", "whats up", "what's up", "what up",
+		"who are you", "what are you", "help":
+		return true
+	}
+	// Very short 1–2 word greetings with common openers.
+	words := strings.Fields(s)
+	if len(words) <= 2 {
+		switch words[0] {
+		case "hi", "hello", "hey", "yo", "sup", "howdy", "hola", "thanks", "bye":
+			return true
+		}
+	}
+	return false
 }

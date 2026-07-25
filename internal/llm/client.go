@@ -292,6 +292,76 @@ func (c *Client) Chat(ctx context.Context, req ChatRequest) (Message, error) {
 	return full.Choices[0].Message, nil
 }
 
+// modelsListResponse is OpenAI-compatible GET /v1/models body.
+type modelsListResponse struct {
+	Data []struct {
+		ID string `json:"id"`
+	} `json:"data"`
+	// Ollama native /api/tags shape (fallback if someone points at non-/v1).
+	Models []struct {
+		Name string `json:"name"`
+	} `json:"models"`
+	Error *struct {
+		Message string `json:"message"`
+	} `json:"error,omitempty"`
+}
+
+// ListModels returns model ids from GET {base}/models (Ollama / OpenAI-compatible).
+func (c *Client) ListModels(ctx context.Context) ([]string, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.BaseURL+"/models", nil)
+	if err != nil {
+		return nil, err
+	}
+	if c.APIKey != "" {
+		req.Header.Set("Authorization", "Bearer "+c.APIKey)
+	}
+	cli := &http.Client{Timeout: 8 * time.Second}
+	resp, err := cli.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("list models at %s: %w", c.BaseURL, err)
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if err != nil {
+		return nil, err
+	}
+	if resp.StatusCode >= 300 {
+		return nil, fmt.Errorf("list models %s: %s", resp.Status, strings.TrimSpace(string(body)))
+	}
+	var parsed modelsListResponse
+	if err := json.Unmarshal(body, &parsed); err != nil {
+		return nil, fmt.Errorf("parse models: %w", err)
+	}
+	if parsed.Error != nil {
+		return nil, fmt.Errorf("API error: %s", parsed.Error.Message)
+	}
+	out := make([]string, 0, len(parsed.Data)+len(parsed.Models))
+	seen := map[string]struct{}{}
+	for _, d := range parsed.Data {
+		id := strings.TrimSpace(d.ID)
+		if id == "" {
+			continue
+		}
+		if _, ok := seen[id]; ok {
+			continue
+		}
+		seen[id] = struct{}{}
+		out = append(out, id)
+	}
+	for _, m := range parsed.Models {
+		id := strings.TrimSpace(m.Name)
+		if id == "" {
+			continue
+		}
+		if _, ok := seen[id]; ok {
+			continue
+		}
+		seen[id] = struct{}{}
+		out = append(out, id)
+	}
+	return out, nil
+}
+
 // Ping checks the server is reachable (Ollama tags or models list).
 func (c *Client) Ping(ctx context.Context) error {
 	// Try OpenAI-compatible /models

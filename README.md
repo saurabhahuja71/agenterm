@@ -206,6 +206,7 @@ Environment overrides:
 | `AGENTERM_BASE_URL` | API root |
 | `AGENTERM_MODEL` | Model id |
 | `AGENTERM_PROVIDER` | Preset name |
+| `AGENTERM_ENABLE_TOOLS` | `0`/`false` to disable tools; `1`/`true` to enable |
 | `AGENTERM_API_KEY` / `OLLAMA_API_KEY` / `XAI_API_KEY` / `OPENAI_API_KEY` | Auth |
 | `AGENTERM_CONFIG` | Config path |
 
@@ -243,14 +244,28 @@ Disable MCP for a session: `./agenterm --no-mcp`
 
 ```bash
 agenterm                  # TUI
-agenterm init             # default config
+agenterm init             # default config (use --force to overwrite)
 agenterm --ping           # connectivity check
 agenterm -m qwen2.5
 agenterm --provider ollama-remote
 agenterm --base-url http://host:11434/v1
+agenterm --no-tools       # pure chat (no function tools; faster replies)
 agenterm --shell          # allow run_shell
 agenterm --no-mcp
 ```
+
+**Snappy chat over Ollama:** greetings never attach tools (no pointless `list_dir` on “hi”).
+Use `/tools off` in the TUI or `enable_tools = false` / `AGENTERM_ENABLE_TOOLS=0` for fully tool-free sessions.
+
+**Switch model mid-chat (Grok-style):**
+
+```text
+/model                         # list models from the server (* = current)
+/model qwen2.5-coder:32b       # switch for the next messages
+/models                        # alias for /model
+```
+
+Start with a model: `agenterm -m qwen3.6-plus:latest`
 
 ---
 

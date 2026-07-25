@@ -65,7 +65,7 @@ type streamClosedMsg struct{}
 
 func New(deps Deps) model {
 	ta := textarea.New()
-	ta.Placeholder = "Message agenterm…  (/help)"
+	ta.Placeholder = "Message…  /help  /model  /tools off"
 	ta.Focus()
 	ta.Prompt = "❯ "
 	ta.CharLimit = 0
@@ -92,7 +92,7 @@ func New(deps Deps) model {
 		lines: []chatLine{
 			{role: "system", text: "agenterm — snappy terminal agent (Ollama / OpenAI-compatible + MCP)"},
 			{role: "system", text: "Endpoint: " + deps.Summary},
-			{role: "system", text: "Enter send · Ctrl+C quit · /help"},
+			{role: "system", text: "Enter send · Ctrl+C quit · /help · /model · /tools"},
 		},
 	}
 	m.refreshViewport()
@@ -172,6 +172,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				role: "tool",
 				text: fmt.Sprintf("← %s\n%s", ev.Tool, truncate(ev.ToolOut, 900)),
 			})
+			m.refreshViewport()
+		case agent.EventStatus:
+			if ev.Text != "" {
+				m.status = ev.Text
+			}
 			m.refreshViewport()
 		case agent.EventError:
 			m.flushStreamAsLine()
@@ -264,13 +269,26 @@ func (m model) handleSlash(text string) (model, tea.Cmd) {
 		m.lines = []chatLine{{role: "system", text: "history cleared"}}
 	case "/status":
 		m.lines = append(m.lines, chatLine{role: "system", text: m.deps.Summary + "\nstatus: " + m.status})
-	case "/model":
+	case "/model", "/models":
+		return m.handleModelCmd(parts)
+	case "/tools":
 		if len(parts) < 2 {
-			m.lines = append(m.lines, chatLine{role: "system", text: "usage: /model <name>\ncurrent: " + m.deps.Agent.Cfg.Model})
+			state := "on"
+			if !m.deps.Agent.Cfg.EnableTools {
+				state = "off"
+			}
+			m.lines = append(m.lines, chatLine{role: "system", text: "tools: " + state + "\nusage: /tools on | /tools off"})
 		} else {
-			m.deps.Agent.Cfg.Model = parts[1]
-			m.deps.Summary = fmt.Sprintf("%s · %s · %s", m.deps.Agent.Cfg.Provider, m.deps.Agent.Cfg.Model, m.deps.Agent.Cfg.BaseURL)
-			m.lines = append(m.lines, chatLine{role: "system", text: "model set to " + parts[1]})
+			switch strings.ToLower(parts[1]) {
+			case "on", "true", "1", "enable":
+				m.deps.Agent.Cfg.EnableTools = true
+				m.lines = append(m.lines, chatLine{role: "system", text: "tools enabled (used only when the task needs them)"})
+			case "off", "false", "0", "disable":
+				m.deps.Agent.Cfg.EnableTools = false
+				m.lines = append(m.lines, chatLine{role: "system", text: "tools disabled for this session (faster chat)"})
+			default:
+				m.lines = append(m.lines, chatLine{role: "error", text: "usage: /tools on | /tools off"})
+			}
 		}
 	default:
 		m.lines = append(m.lines, chatLine{role: "error", text: "unknown command " + cmd + " — try /help"})
@@ -282,11 +300,20 @@ func (m model) handleSlash(text string) (model, tea.Cmd) {
 func helpText() string {
 	return strings.TrimSpace(`
 Commands:
-  /help           This help
-  /clear          Clear conversation
-  /status         Provider · model · URL
-  /model <name>   Switch model (session)
-  /quit           Hint to exit (Ctrl+C)
+  /help              This help
+  /clear             Clear conversation
+  /status            Provider · model · URL
+  /model             List models from the server (current marked *)
+  /model <name>      Switch model for this chat (immediate, like Grok)
+  /models            Same as /model
+  /tools on|off      Toggle function tools (session; off = faster chat)
+  /quit              Hint to exit (Ctrl+C)
+
+Examples:
+  /model
+  /model qwen2.5-coder:32b
+  /model qwen3.6-plus:latest
+  /tools off
 
 Keys:
   Enter           Send
@@ -295,10 +322,77 @@ Keys:
   PgUp / PgDn     Scroll
 
 Ollama:
-  Local default   http://127.0.0.1:11434/v1
+  Local default   http://127.0.0.1:11434/v1 (SSH tunnel to remote is fine)
   Edit            ~/.agenterm/config.toml
+  Fast chat       agenterm --no-tools   or   enable_tools = false
   Remote example  providers.ollama-remote.base_url = "http://gpu-host:11434/v1"
 `)
+}
+
+// handleModelCmd implements Grok-style mid-chat model switch and listing.
+func (m model) handleModelCmd(parts []string) (model, tea.Cmd) {
+	cur := m.deps.Agent.Cfg.Model
+	// /model  or  /model list  → show available models from the endpoint
+	if len(parts) < 2 || strings.EqualFold(parts[1], "list") || strings.EqualFold(parts[1], "ls") {
+		ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+		defer cancel()
+		ids, err := m.deps.Agent.Client.ListModels(ctx)
+		if err != nil {
+			m.lines = append(m.lines, chatLine{
+				role: "error",
+				text: fmt.Sprintf("could not list models: %v\ncurrent: %s\nusage: /model <name>", err, cur),
+			})
+			m.refreshViewport()
+			return m, nil
+		}
+		if len(ids) == 0 {
+			m.lines = append(m.lines, chatLine{
+				role: "system",
+				text: "no models reported by server\ncurrent: " + cur + "\nusage: /model <name>",
+			})
+			m.refreshViewport()
+			return m, nil
+		}
+		var b strings.Builder
+		b.WriteString("Models at ")
+		b.WriteString(m.deps.Agent.Cfg.BaseURL)
+		b.WriteString("\n")
+		b.WriteString("current: ")
+		b.WriteString(cur)
+		b.WriteString("\n\n")
+		for _, id := range ids {
+			mark := "  "
+			if id == cur {
+				mark = "* "
+			}
+			b.WriteString(mark)
+			b.WriteString(id)
+			b.WriteByte('\n')
+		}
+		b.WriteString("\nSwitch: /model <name>")
+		m.lines = append(m.lines, chatLine{role: "system", text: strings.TrimRight(b.String(), "\n")})
+		m.refreshViewport()
+		return m, nil
+	}
+
+	// /model <name> — tags may include ":" (e.g. qwen2.5-coder:32b); join rest.
+	name := strings.TrimSpace(strings.Join(parts[1:], " "))
+	if name == "" {
+		m.lines = append(m.lines, chatLine{role: "error", text: "usage: /model <name>"})
+		m.refreshViewport()
+		return m, nil
+	}
+	prev := cur
+	m.deps.Agent.Cfg.Model = name
+	m.deps.Summary = fmt.Sprintf("%s · %s · %s", m.deps.Agent.Cfg.Provider, m.deps.Agent.Cfg.Model, m.deps.Agent.Cfg.BaseURL)
+	m.status = "model: " + name
+	msg := fmt.Sprintf("model set to %s", name)
+	if prev != "" && prev != name {
+		msg = fmt.Sprintf("model: %s → %s  (applies to next message)", prev, name)
+	}
+	m.lines = append(m.lines, chatLine{role: "system", text: msg})
+	m.refreshViewport()
+	return m, nil
 }
 
 func (m *model) upsertStreamingAssistant(content string) {
