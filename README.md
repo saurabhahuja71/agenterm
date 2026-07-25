@@ -1,27 +1,21 @@
-# agenterm — Terminal AI Agent for Ollama, OpenAI, xAI & MCP
+# agenterm
 
-**agenterm** is a free, open-source **terminal AI agent** and **CLI chat TUI** written in **Go**.  
-Chat with **local or remote [Ollama](https://ollama.com)** models, **xAI Grok**, **OpenAI**, or any **OpenAI-compatible API** (vLLM, LocalAI, OpenRouter-compatible endpoints, and more) from your shell—with optional **file tools** and **[Model Context Protocol (MCP)](https://modelcontextprotocol.io)** servers.
-
-> **Keywords & discoverability:** terminal AI assistant · Ollama terminal client · CLI LLM agent · Grok-style TUI · local LLM chat · remote Ollama over SSH tunnel · OpenAI-compatible `/v1/chat/completions` · Bubble Tea terminal UI · MCP client in Go · developer coding agent in the terminal
+**Terminal AI agent** for [Ollama](https://ollama.com), [xAI](https://x.ai), [OpenAI](https://openai.com), and any **OpenAI-compatible** API. Chat in a full-screen **TUI**, use **file tools** when you need them, and plug in **[MCP](https://modelcontextprotocol.io)** servers—all from one static Go binary.
 
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Go](https://img.shields.io/badge/Go-1.22+-00ADD8?logo=go)](https://go.dev/)
 [![Ollama](https://img.shields.io/badge/Ollama-compatible-black)](https://ollama.com)
 [![MCP](https://img.shields.io/badge/MCP-client-purple)](https://modelcontextprotocol.io)
 [![Release](https://img.shields.io/github/v/release/saurabhahuja71/agenterm?include_prereleases)](https://github.com/saurabhahuja71/agenterm/releases)
-[![Install](https://img.shields.io/badge/install-one--line-brightgreen)](#install-agenterm-native-binary-recommended)
 
 | | |
 |---|---|
-| **Homepage / source** | [github.com/saurabhahuja71/agenterm](https://github.com/saurabhahuja71/agenterm) |
-| **What it is** | Snappy **terminal AI agent** (not a web UI) |
-| **Best for** | Developers who want **Ollama in the terminal**, coding help, and tool use without leaving the shell |
-| **Runs on** | Linux, macOS, Windows (static binary) · Docker / Podman |
-| **Talks to** | Ollama · xAI · OpenAI · any `/v1` chat API |
+| **Best for** | Developers who want Ollama (or any `/v1` chat API) in the terminal with optional coding tools |
+| **Runs on** | Linux, macOS, Windows · Docker / Podman |
+| **Not** | A web UI or desktop app — pure terminal |
 
 ```
-You (terminal TUI)
+You (TUI)
    │
    ▼
 agenterm  ──►  Ollama / xAI / OpenAI  (POST /v1/chat/completions)
@@ -31,87 +25,90 @@ agenterm  ──►  Ollama / xAI / OpenAI  (POST /v1/chat/completions)
 
 ---
 
+## Get started in 60 seconds
+
+**1. Install** (Linux / macOS):
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/saurabhahuja71/agenterm/main/scripts/install.sh | bash
+```
+
+Binary goes to `~/.local/bin/agenterm`. If the shell cannot find it:
+
+```bash
+export PATH="$HOME/.local/bin:$PATH"
+```
+
+**2. Start Ollama** (local or already tunneled to your machine):
+
+```bash
+ollama pull qwen2.5-coder:32b
+ollama serve   # http://127.0.0.1:11434
+```
+
+**3. Chat:**
+
+```bash
+agenterm init          # first time: writes ~/.agenterm/config.toml
+agenterm --ping        # check the API
+agenterm               # open the TUI
+```
+
+In the TUI: type a message and press **Enter**. Try `/help`, `/model`, or `/tools off` for pure chat.
+
+---
+
 ## Table of contents
 
 - [Why agenterm?](#why-agenterm)
-- [Features](#features-terminal-ai-agent--ollama-tui)
-- [Install agenterm](#install-agenterm-native-binary-recommended)
-- [Quick start with Ollama](#quick-start-chat-with-ollama-in-the-terminal)
-- [Local vs remote Ollama](#local-vs-remote-ollama-and-ssh-tunnels)
-- [Docker / Podman](#run-agenterm-in-docker-or-podman)
-- [CLI reference](#cli-reference-and-in-chat-commands)
-- [Configuration](#configuration-env-and-configtoml)
-- [Built-in tools & MCP](#built-in-tools-and-mcp-integration)
-- [FAQ](#faq-terminal-ai-ollama-and-agenterm)
-- [Architecture & tech stack](#architecture-and-tech-stack)
-- [Roadmap vs Grok UI](#roadmap-vs-grok-ui)
-- [Releases](#releases-and-downloads)
+- [Install](#install)
+- [Quick start](#quick-start)
+- [Local vs remote Ollama](#local-vs-remote-ollama)
+- [Docker / Podman](#docker--podman)
+- [CLI and in-chat commands](#cli-and-in-chat-commands)
+- [Configuration](#configuration)
+- [Tools and MCP](#tools-and-mcp)
+- [FAQ](#faq)
+- [Architecture](#architecture)
+- [Releases](#releases)
 - [License](#license)
 
 ---
 
 ## Why agenterm?
 
-Many people search for a **terminal AI chatbot**, an **Ollama CLI with a real TUI**, or a **Grok-like agent in the terminal** without sending all code to a browser.
+| You want… | agenterm does… |
+|-----------|----------------|
+| Chat with **local LLMs** | Defaults to Ollama at `http://127.0.0.1:11434/v1` |
+| A **GPU box over the network** | `--base-url` or an SSH tunnel to localhost |
+| A **coding agent** in the shell | Tool loop: list/read/write files; optional shell; MCP |
+| Switch models mid-session | `/model` while chatting |
+| Fast small talk | Greetings skip tools; use `--no-tools` for pure chat |
+| No Python/Node runtime | One **static Go binary** |
 
-**agenterm** fills that gap:
-
-| Need | How agenterm helps |
-|------|---------------------|
-| Chat with **local LLMs** | Default endpoint is Ollama at `http://127.0.0.1:11434/v1` |
-| Use a **GPU box over the network** | Point `--base-url` at remote Ollama or an SSH tunnel on localhost |
-| **Coding agent** in the shell | Tool loop: list/read/write files; optional shell; optional MCP |
-| Switch models mid-session | `/model` and `/models` (Grok-style) while chatting |
-| Fast small talk | Greetings skip tools so “hi” is one round-trip, not a `list_dir` storm |
-| No heavy runtime | Single **static Go binary**—no Python/Node required to run releases |
-
-**Not affiliated with xAI.** “Grok-style” describes the **terminal agent UX** only.
+Not affiliated with xAI. “Grok-style” only means a snappy terminal agent UX.
 
 ---
 
-## Features: terminal AI agent & Ollama TUI
+## Install
 
-- Full-screen **terminal UI** (Bubble Tea): streaming replies, tool traces, dark theme  
-- **Ollama-first** defaults with OpenAI-compatible HTTP  
-- **Local and remote Ollama**, xAI, OpenAI, vLLM, LocalAI, and similar APIs  
-- **Multi-turn agent loop** with function/tool calling when the model supports it  
-- **Mid-chat model switch:** `/model`, `/models`  
-- **Tools on/off:** `--no-tools`, `/tools off`, `AGENTERM_ENABLE_TOOLS`  
-- Optional **MCP** (HTTP streamable or stdio) as extra tools  
-- Install via **one-line script**, GitHub Releases, `go install`, or **container**  
-
----
-
-## Install agenterm (native binary, recommended)
-
-### One-line install (Linux / macOS)
+### One-line (recommended)
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/saurabhahuja71/agenterm/main/scripts/install.sh | bash
-```
-
-Installs to `~/.local/bin/agenterm` by default. Ensure that directory is on your `PATH`.
-
-```bash
 agenterm --version
-agenterm init          # writes ~/.agenterm/config.toml
-agenterm --ping
-agenterm
 ```
-
-Environment options for the installer:
 
 | Variable | Meaning |
 |----------|---------|
 | `INSTALL_DIR` | Install path (default `~/.local/bin`) |
 | `AGENTERM_VERSION` | Release tag or `latest` |
-| `AGENTERM_FROM_SOURCE=1` | Build with Go if no release asset (or prefer source) |
+| `AGENTERM_FROM_SOURCE=1` | Build with Go instead of downloading a release |
 | `AGENTERM_SKIP_INIT=1` | Do not create config |
 
-### Manual download from GitHub Releases
+### GitHub Releases
 
 ```bash
-# example: Linux amd64
 curl -fsSL -o agenterm \
   https://github.com/saurabhahuja71/agenterm/releases/latest/download/agenterm-linux-amd64
 chmod +x agenterm && ./agenterm
@@ -119,60 +116,57 @@ chmod +x agenterm && ./agenterm
 
 Also published: `linux-arm64`, `darwin-amd64`, `darwin-arm64`, `windows-amd64.exe`.
 
-### Build from source (developers)
+### From source
 
 ```bash
 git clone https://github.com/saurabhahuja71/agenterm.git
 cd agenterm
 make build          # → ./agenterm
+make install        # → $(go env GOPATH)/bin (or $GOBIN)
 # or:
 go install github.com/saurabhahuja71/agenterm/cmd/agenterm@latest
 ```
 
 ---
 
-## Quick start: chat with Ollama in the terminal
+## Quick start
 
-### 1. Run Ollama (local or tunnel)
-
-```bash
-ollama pull qwen2.5-coder:32b   # default for Go + docs agent work
-ollama serve   # http://127.0.0.1:11434
-```
-
-If Ollama runs on another machine, forward it (SSH tunnel is enough):
+### Ollama on this machine
 
 ```bash
-ssh -N -L 11434:127.0.0.1:11434 user@gpu-host
-# then agenterm still uses http://127.0.0.1:11434/v1
-```
-
-### 2. Start agenterm
-
-```bash
+ollama pull qwen2.5-coder:32b
 agenterm --ping
 agenterm -m qwen2.5-coder:32b
-# pure chat (fastest):
+# pure chat (no function tools):
 agenterm --no-tools -m qwen2.5-coder:32b
 ```
 
-### 3. In the TUI
+### Ollama on another host (SSH tunnel)
+
+```bash
+ssh -N -L 11434:127.0.0.1:11434 user@gpu-host
+# agenterm still uses http://127.0.0.1:11434/v1
+agenterm
+```
+
+### In the TUI
 
 | Action | How |
 |--------|-----|
 | Send message | **Enter** |
 | Help | `/help` |
-| List models on server | `/model` |
-| Switch model (like Grok) | `/model qwen2.5-coder:32b` |
+| List / switch model | `/model` · `/model qwen2.5-coder:32b` |
 | Disable tools this session | `/tools off` |
 | Clear history | `/clear` or **Ctrl+L** |
 | Quit | **Ctrl+C** |
 
+Run agenterm from the project directory you care about (`cd myrepo && agenterm`) so file tools use that workspace.
+
 ---
 
-## Local vs remote Ollama (and SSH tunnels)
+## Local vs remote Ollama
 
-### Config file (`~/.agenterm/config.toml`)
+### Config (`~/.agenterm/config.toml`)
 
 ```toml
 provider = "ollama-local"
@@ -181,7 +175,7 @@ base_url = "http://127.0.0.1:11434/v1"
 api_key = "ollama"
 ```
 
-**Remote Ollama** on the LAN:
+Remote host on the LAN:
 
 ```toml
 provider = "ollama-remote"
@@ -195,28 +189,25 @@ model = "qwen2.5"
 ### One-shot CLI
 
 ```bash
-# local or SSH tunnel
 agenterm --base-url http://127.0.0.1:11434/v1 -m qwen2.5-coder:32b
-
-# remote host
 agenterm --base-url http://gpu-box:11434/v1 -m qwen2.5
 
-# xAI Grok API
 export XAI_API_KEY=xai-...
 agenterm --provider xai -m grok-3
 
-# OpenAI
 export OPENAI_API_KEY=sk-...
 agenterm --provider openai -m gpt-4o-mini
 ```
 
-Always include **`/v1`** on Ollama base URLs so OpenAI-compatible routes work (`/v1/chat/completions`, `/v1/models`).
+Always include **`/v1`** on Ollama base URLs (`/v1/chat/completions`, `/v1/models`).
+
+Full example: [`configs/config.example.toml`](configs/config.example.toml).
 
 ---
 
-## Run agenterm in Docker or Podman
+## Docker / Podman
 
-Use a container when you want a locked-down runtime; keep Ollama on the host or remote.
+Prefer the **native binary** for daily use. Use a container when you want a locked-down runtime.
 
 ```bash
 podman run --rm -it --network=host \
@@ -228,111 +219,92 @@ podman run --rm -it --network=host \
 From this repo:
 
 ```bash
-git clone https://github.com/saurabhahuja71/agenterm.git
-cd agenterm
 ./scripts/run-podman.sh --ping
 ./scripts/run-podman.sh
 ```
 
 | Need | Why |
 |------|-----|
-| `-it` / TTY | Interactive **TUI** |
+| `-it` / TTY | Interactive TUI |
 | `--network=host` (Linux) | Reach host Ollama at `127.0.0.1:11434` |
 | Volume `~/.agenterm` | Persist config |
 
-**Remote Ollama from a container:**
-
-```bash
-AGENTERM_BASE_URL=http://gpu-box:11434/v1 ./scripts/run-podman.sh
-```
-
-**macOS Docker Desktop:** use `http://host.docker.internal:11434/v1` for host Ollama.
-
-**Compose:**
+On **macOS Docker Desktop**, use `http://host.docker.internal:11434/v1` for host Ollama.
 
 ```bash
 export DOCKER_HOST=unix:///run/user/$(id -u)/podman/podman.sock   # rootless Podman
 podman compose run --rm agenterm
-# or: docker compose run --rm agenterm
 ```
-
-| Mode | Best when | Limitations |
-|------|-----------|-------------|
-| **Native binary** | Daily use, full host access | Need OS/arch binary or Go |
-| **Podman / Docker** | CI, locked-down hosts | TTY + networking setup |
 
 ---
 
-## CLI reference and in-chat commands
+## CLI and in-chat commands
 
 ### Flags
 
 ```bash
 agenterm                  # open TUI
-agenterm init             # default config (use --force to overwrite)
+agenterm init             # default config (--force to overwrite)
 agenterm --ping           # connectivity check
 agenterm -m qwen2.5       # start with a model
 agenterm --provider ollama-remote
 agenterm --base-url http://host:11434/v1
-agenterm --no-tools       # pure chat (no function tools; faster replies)
+agenterm --no-tools       # pure chat (faster)
 agenterm --shell          # allow run_shell
 agenterm --no-mcp
 ```
 
-### In-chat commands (session)
+### In-chat
 
 ```text
 /help
 /status
-/model                         # list models from the server (* = current)
-/model qwen2.5-coder:32b       # switch model for next messages
+/model                         # list models (* = current)
+/model qwen2.5-coder:32b       # switch model
 /models                        # alias for /model
 /tools on | /tools off
 /clear
 /quit
 ```
 
-**Snappy Ollama chat:** greetings do not attach tools (avoids pointless `list_dir` on “hi”).  
-For fully tool-free sessions: `/tools off`, `enable_tools = false`, or `AGENTERM_ENABLE_TOOLS=0`.
+Greetings skip tools automatically. For fully tool-free sessions: `/tools off`, `enable_tools = false`, or `AGENTERM_ENABLE_TOOLS=0`.
 
 ---
 
-## Configuration, env, and config.toml
+## Configuration
 
 | Env | Meaning |
 |-----|---------|
 | `AGENTERM_BASE_URL` | API root (e.g. `http://127.0.0.1:11434/v1`) |
 | `AGENTERM_MODEL` | Model id / Ollama tag |
-| `AGENTERM_PROVIDER` | Preset: `ollama-local`, `ollama-remote`, `xai`, `openai`, `custom` |
+| `AGENTERM_PROVIDER` | `ollama-local`, `ollama-remote`, `xai`, `openai`, `custom` |
 | `AGENTERM_ENABLE_TOOLS` | `0`/`false` off · `1`/`true` on |
 | `AGENTERM_API_KEY` / `OLLAMA_API_KEY` / `XAI_API_KEY` / `OPENAI_API_KEY` | Auth |
 | `AGENTERM_CONFIG` | Path to config file |
 
-Example file: [`configs/config.example.toml`](configs/config.example.toml).
+Default file: `~/.agenterm/config.toml`.
 
 ---
 
-## Built-in tools and MCP integration
+## Tools and MCP
 
 ### Built-in tools
 
 | Tool | Notes |
 |------|--------|
-| `list_dir` | List directory (path relative to process cwd) |
-| `read_file` | Read file; resolves common bad paths (`repo/…`, `dbope`→`dboper`) |
-| `write_file` | Write full file (apply changes to disk) |
-| `str_replace` | Surgical edit (preferred for README/code patches) |
-| `find_files` | Locate `README.md` / project folders when the full path is unknown |
-| `git` | Allowlisted git (`status`, `checkout`, `add`, `commit`, `push`, …) |
-| `run_shell` | Off by default; `enable_shell = true` or `--shell` |
+| `list_dir` | List a directory (relative to process cwd) |
+| `read_file` | Read a file |
+| `write_file` | Write a full file |
+| `str_replace` | Surgical edit (preferred for patches) |
+| `find_files` | Locate files when the path is unknown |
+| `git` | Allowlisted git (`status`, `checkout`, `add`, `commit`, …) |
+| `run_shell` | Off by default; `--shell` or `enable_shell = true` |
 
-When you say **“do it” / apply / implement**, agenterm enters **action mode** and must use tools — not only print shell steps.
+When you ask to **apply / implement / do it**, agenterm uses tools—not only printed shell recipes.
 
-**Tip:** start agenterm from the workspace root you care about (e.g. `cd …/dboper && agenterm`). Paths and tools use that directory.
+### MCP
 
-### MCP tools
-
-agenterm is an **MCP client**. Enable servers in config (example: [mcp-demo](https://github.com/saurabhahuja71/mcp-demo)):
+agenterm is an **MCP client**. Example:
 
 ```toml
 [[mcp_servers]]
@@ -341,53 +313,51 @@ enabled = true
 url = "http://127.0.0.1:8080/mcp"
 ```
 
-Disable MCP for a session: `agenterm --no-mcp`.
+Disable for a session: `agenterm --no-mcp`. Demo server: [mcp-demo](https://github.com/saurabhahuja71/mcp-demo).
 
 ---
 
-## FAQ: terminal AI, Ollama, and agenterm
+## FAQ
 
 ### What is agenterm?
 
-**agenterm** is an open-source **terminal AI agent** in Go: a full-screen TUI that streams chat from Ollama or any OpenAI-compatible API and can run tools (files, shell, MCP).
+An open-source **terminal AI agent** in Go: a full-screen TUI that streams chat from Ollama or any OpenAI-compatible API, with optional tools (files, shell, MCP).
 
-### Is agenterm an Ollama GUI or CLI?
+### Is it an Ollama GUI?
 
-It is a **terminal TUI** (text UI in the terminal), not a web or desktop GUI. It is a great **Ollama terminal client** when you want chat + agent tools without leaving the shell.
+No—it is a **terminal TUI**, not a web or desktop GUI. Use it when you want chat and agent tools without leaving the shell.
 
 ### Can I use remote Ollama or an SSH tunnel?
 
-Yes. Set `base_url` / `--base-url` to the remote host, or tunnel remote Ollama to `127.0.0.1:11434` and use the default local URL.
+Yes. Point `base_url` / `--base-url` at the host, or tunnel remote Ollama to `127.0.0.1:11434` and keep the default URL.
 
 ### Does it work with xAI Grok and OpenAI?
 
-Yes. Use `--provider xai` or `--provider openai` with the matching API key environment variables, or any custom `--base-url` that speaks OpenAI chat completions.
+Yes. `--provider xai` or `--provider openai` with the matching API key env vars, or any custom `--base-url` that speaks OpenAI chat completions.
 
 ### How do I change the model during a chat?
 
-Type `/model` to list models, then `/model <name>` (for example `/model qwen2.5-coder:32b`). Same idea as switching models mid-conversation in other agent UIs.
+`/model` to list, then `/model <name>` (for example `/model qwen2.5-coder:32b`).
 
 ### Why was “hi” slow before?
 
-Some models eagerly called tools (e.g. `list_dir`) on greetings, causing extra LLM round-trips over the network. agenterm now skips tools for trivial chat and supports `--no-tools` / `/tools off`.
+Some models called tools (e.g. `list_dir`) on greetings. Trivial chat now skips tools; use `--no-tools` or `/tools off` for pure chat.
 
 ### Is Python required?
 
-**No** for release binaries. agenterm is a **static Go binary**. Python/Node are not needed to run it.
+No for release binaries. agenterm is a **static Go binary**.
 
-### Is this related to xAI Grok?
-
-No affiliation. The product is independent; “Grok-style” only means a snappy terminal agent experience.
-
-### Where is the config stored?
+### Where is the config?
 
 Default: `~/.agenterm/config.toml`. Override with `AGENTERM_CONFIG` or `--config`.
 
+### Is this related to xAI Grok?
+
+No affiliation. Independent project.
+
 ---
 
-## Architecture and tech stack
-
-### Project layout
+## Architecture
 
 ```
 cmd/agenterm/          CLI entry
@@ -397,75 +367,29 @@ internal/agent/        Multi-turn tool loop
 internal/tools/        Built-in tools
 internal/mcp/          MCP client
 internal/tui/          Bubble Tea UI
-configs/config.example.toml
 scripts/install.sh     End-user installer
 ```
 
-### Core stack
-
 | Piece | Tech |
 |--------|------|
-| Language | **Go** (Golang) |
-| Module | `github.com/saurabhahuja71/agenterm` |
+| Language | Go |
 | CLI | [Cobra](https://github.com/spf13/cobra) |
-| Config | [BurntSushi/toml](https://github.com/BurntSushi/toml) |
 | TUI | [Bubble Tea](https://github.com/charmbracelet/bubbletea) · Bubbles · Lip Gloss |
 | Markdown | [Glamour](https://github.com/charmbracelet/glamour) |
-| LLM HTTP | Custom `internal/llm` → `POST /v1/chat/completions` (SSE) |
 | MCP | [official Go MCP SDK](https://github.com/modelcontextprotocol/go-sdk) |
-
-```
-┌─────────────────────────────────────┐
-│  TUI (Bubble Tea / Lip Gloss)       │
-└─────────────────┬───────────────────┘
-                  │
-┌─────────────────▼───────────────────┐
-│  Agent loop (internal/agent)        │
-└─────────────┬───────────┬───────────┘
-              │           │
-              ▼           ▼
-     LLM client      Tools + MCP
-              │
-              ▼
-   Ollama / xAI / OpenAI / any /v1 API
-```
 
 Chat **replies** come from the LLM. MCP only supplies **tools**. Models are **not** embedded in the binary.
 
-### Related projects
+More detail: [`docs/how-it-works.md`](docs/how-it-works.md).  
+Roadmap (Grok-class UX): [`docs/grok-parity-roadmap.md`](docs/grok-parity-roadmap.md).
 
-| Project | Stack |
-|---------|--------|
-| [reactapp](https://github.com/saurabhahuja71/reactapp) | React + FastAPI + Postgres |
-| [react-java-todo](https://github.com/saurabhahuja71/react-java-todo) | React + Spring Boot + Postgres |
-| [mcp-demo](https://github.com/saurabhahuja71/mcp-demo) | Go **MCP server** |
-| **agenterm** | Go **MCP client + TUI + LLM agent** |
-
-More detail: [`docs/how-it-works.md`](docs/how-it-works.md).
-
-### Roadmap vs Grok UI
-
-Notes on what agenterm has, what Grok-class UIs have, and phased work (resume later):
-
-→ **[`docs/grok-parity-roadmap.md`](docs/grok-parity-roadmap.md)**
-
-### One-line summary (for crawlers & humans)
-
-> **agenterm** is a **Go terminal AI agent** with a **Bubble Tea TUI**, **Ollama / OpenAI-compatible** chat, a **tool-calling agent loop**, and optional **MCP**—shipped as **static binaries** and a **Docker/Podman** image.
+**Notes:** Ollama must expose the OpenAI-compatible API (default). Tool quality depends on the model (`qwen2.5`, `llama3.1+` work better than tiny models).
 
 ---
 
-## Notes
+## Releases
 
-- Ollama must expose the **OpenAI-compatible** API (`/v1/chat/completions`). Current Ollama does this by default.
-- Tool-calling quality depends on the model (e.g. `qwen2.5`, `llama3.1+` work better than tiny models).
-- Not affiliated with xAI, OpenAI, or Ollama.
-
----
-
-## Releases and downloads
-
-GitHub Actions builds **multi-platform binaries** and a **GHCR** image on version tags:
+On version tags, GitHub Actions publishes multi-platform binaries and a GHCR image:
 
 | Asset | Platforms |
 |-------|-----------|
@@ -477,33 +401,20 @@ GitHub Actions builds **multi-platform binaries** and a **GHCR** image on versio
 | `ghcr.io/saurabhahuja71/agenterm:vX.Y.Z` | Container |
 
 ```bash
-# cut a release
-git tag v0.1.1
-git push origin v0.1.1
-
-# local cross-build
-make dist VERSION=0.1.1
-```
-
-```bash
-podman pull ghcr.io/saurabhahuja71/agenterm:latest
-podman run --rm -it --network=host \
-  -v "$HOME/.agenterm:/home/agenterm/.agenterm:Z" \
-  ghcr.io/saurabhahuja71/agenterm:latest
+git tag v0.2.1 && git push origin v0.2.1
+make dist VERSION=0.2.1   # local cross-build
 ```
 
 ---
 
 ## License
 
-MIT — free to use, modify, and distribute. See repository license file when present.
+MIT — free to use, modify, and distribute.
 
 ---
 
-## Topics (GitHub discovery)
+## GitHub topics (maintainers)
 
-Suggested repository topics for search and SEO:
+Suggested topics for the About sidebar:
 
-`ai` · `terminal` · `cli` · `tui` · `ollama` · `llm` · `openai` · `xai` · `grok` · `mcp` · `agent` · `golang` · `bubbletea` · `coding-assistant` · `local-llm` · `chatbot`
-
-If you maintain this repo on GitHub: **Settings → General → Topics**, or the gear next to About on the repo home page.
+`ai` · `terminal` · `cli` · `tui` · `ollama` · `llm` · `openai` · `mcp` · `agent` · `golang` · `bubbletea` · `coding-assistant` · `local-llm`
