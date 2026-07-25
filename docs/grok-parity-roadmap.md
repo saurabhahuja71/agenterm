@@ -251,6 +251,7 @@ You will not match **hosted Grok** by only polishing the TUI.
 | Smoke scripts | `scripts/smoke_agent.go`, `scripts/smoke_sidb.go` |
 | Default model | `qwen2.5-coder:32b` for Go + docs |
 | First-launch OSC junk | Fixed dark glamour (no `WithAutoStyle` color probe); scrub `]11;rgb:…` from input |
+| Apply changes (not only chat) | `str_replace` + allowlisted `git` tools; action-mode nudge on “do it” / apply / commit |
 
 ---
 

@@ -115,6 +115,10 @@ func parseOneToolJSON(raw string, knownTools map[string]struct{}) (llm.ToolCall,
 		name = "list_dir"
 	case "write", "Write", "WriteFile", "write-file":
 		name = "write_file"
+	case "str_replace", "replace", "Replace", "edit", "Edit", "edit_file", "search_replace":
+		name = "str_replace"
+	case "git", "Git":
+		name = "git"
 	case "find", "Find", "FindFiles", "find-files", "search":
 		name = "find_files"
 	case "shell", "bash", "run":

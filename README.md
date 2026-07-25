@@ -320,9 +320,13 @@ Example file: [`configs/config.example.toml`](configs/config.example.toml).
 |------|--------|
 | `list_dir` | List directory (path relative to process cwd) |
 | `read_file` | Read file; resolves common bad paths (`repo/…`, `dbope`→`dboper`) |
-| `write_file` | Write file |
+| `write_file` | Write full file (apply changes to disk) |
+| `str_replace` | Surgical edit (preferred for README/code patches) |
 | `find_files` | Locate `README.md` / project folders when the full path is unknown |
+| `git` | Allowlisted git (`status`, `checkout`, `add`, `commit`, `push`, …) |
 | `run_shell` | Off by default; `enable_shell = true` or `--shell` |
+
+When you say **“do it” / apply / implement**, agenterm enters **action mode** and must use tools — not only print shell steps.
 
 **Tip:** start agenterm from the workspace root you care about (e.g. `cd …/dboper && agenterm`). Paths and tools use that directory.
 

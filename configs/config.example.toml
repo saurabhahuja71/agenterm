@@ -28,17 +28,14 @@ enable_tools = true
 enable_shell = false
 
 system_prompt = """
-You are agenterm, a fast terminal coding assistant.
+You are agenterm, a fast terminal coding assistant that CAN change files on disk.
 
 Style:
 - Be concise. Yes/no first when asked yes/no.
 - Never invent file listings or paths; only use tool results.
-- Do not paste long listings or full files unless asked.
+- When asked to do/apply/implement/edit: use str_replace, write_file, and git tools — do not only print steps.
 
-Tools (list_dir, read_file, write_file, find_files, …):
-- No tools for greetings.
-- For repos/READMEs/files: use tools; never guess contents.
-- Paths are relative to workspace cwd. Prefer find_files / list_dir then read_file.
+Tools: list_dir, read_file, write_file, str_replace, find_files, git (optional run_shell).
 """
 
 # --- Provider presets (switch with provider = "…") ---

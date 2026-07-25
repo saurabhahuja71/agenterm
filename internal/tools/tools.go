@@ -153,15 +153,15 @@ type writeFile struct{}
 
 func (writeFile) Name() string { return "write_file" }
 func (writeFile) Description() string {
-	return "Write content to a file (creates parent dirs)"
+	return "APPLY changes: write full file contents to disk (creates parent dirs). Use when the user asks you to implement/edit/update a file — do not only describe the change."
 }
 func (writeFile) Schema() map[string]any {
 	return map[string]any{
 		"type":     "object",
 		"required": []string{"path", "content"},
 		"properties": map[string]any{
-			"path":    map[string]any{"type": "string"},
-			"content": map[string]any{"type": "string"},
+			"path":    map[string]any{"type": "string", "description": "File path relative to cwd or absolute"},
+			"content": map[string]any{"type": "string", "description": "Full new file contents"},
 		},
 	}
 }
@@ -183,6 +183,148 @@ func (writeFile) Run(_ context.Context, argsJSON string) (string, error) {
 		return "", err
 	}
 	return fmt.Sprintf("wrote %d bytes to %s", len(in.Content), in.Path), nil
+}
+
+// strReplace edits a file by replacing an exact old_string with new_string (once or all).
+type strReplace struct{}
+
+func (strReplace) Name() string { return "str_replace" }
+func (strReplace) Description() string {
+	return "APPLY a surgical edit: replace exact text in an existing file. Prefer this over rewrite for README/docs/code patches. old_string must match exactly once unless replace_all is true."
+}
+func (strReplace) Schema() map[string]any {
+	return map[string]any{
+		"type":     "object",
+		"required": []string{"path", "old_string", "new_string"},
+		"properties": map[string]any{
+			"path":        map[string]any{"type": "string"},
+			"old_string":  map[string]any{"type": "string", "description": "Exact text to find"},
+			"new_string":  map[string]any{"type": "string", "description": "Replacement text"},
+			"replace_all": map[string]any{"type": "boolean", "description": "Replace every occurrence (default false)"},
+		},
+	}
+}
+func (strReplace) Run(_ context.Context, argsJSON string) (string, error) {
+	var in struct {
+		Path       string `json:"path"`
+		OldString  string `json:"old_string"`
+		NewString  string `json:"new_string"`
+		ReplaceAll bool   `json:"replace_all"`
+	}
+	if err := json.Unmarshal([]byte(argsJSON), &in); err != nil {
+		return "", err
+	}
+	if in.Path == "" || in.OldString == "" {
+		return "", fmt.Errorf("path and old_string required")
+	}
+	path, err := resolveExistingFile(in.Path)
+	if err != nil {
+		// allow creating? no — str_replace needs existing
+		return "", err
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return "", err
+	}
+	content := string(data)
+	count := strings.Count(content, in.OldString)
+	if count == 0 {
+		return "", fmt.Errorf("old_string not found in %s", path)
+	}
+	if count > 1 && !in.ReplaceAll {
+		return "", fmt.Errorf("old_string found %d times in %s (set replace_all=true or use a more unique old_string)", count, path)
+	}
+	var next string
+	if in.ReplaceAll {
+		next = strings.ReplaceAll(content, in.OldString, in.NewString)
+	} else {
+		next = strings.Replace(content, in.OldString, in.NewString, 1)
+	}
+	if err := os.WriteFile(path, []byte(next), 0o644); err != nil {
+		return "", err
+	}
+	n := 1
+	if in.ReplaceAll {
+		n = count
+	}
+	return fmt.Sprintf("updated %s (%d replacement(s), now %d bytes)", path, n, len(next)), nil
+}
+
+// gitCmd runs a small allowlisted set of git commands (no full shell).
+type gitCmd struct{}
+
+func (gitCmd) Name() string { return "git" }
+func (gitCmd) Description() string {
+	return "Run a safe git subcommand: status, diff, log, branch, checkout, switch, add, commit, push, pull, stash. Use for real git ops when the user asks to branch/commit/push. Prefer this over printing git commands as chat text."
+}
+func (gitCmd) Schema() map[string]any {
+	return map[string]any{
+		"type":     "object",
+		"required": []string{"args"},
+		"properties": map[string]any{
+			"args": map[string]any{
+				"type":        "array",
+				"items":       map[string]any{"type": "string"},
+				"description": "Git argv after 'git', e.g. [\"status\"], [\"checkout\",\"-b\",\"seo-readme\"], [\"add\",\"README.md\"], [\"commit\",\"-m\",\"msg\"]",
+			},
+		},
+	}
+}
+func (gitCmd) Run(ctx context.Context, argsJSON string) (string, error) {
+	var in struct {
+		Args []string `json:"args"`
+	}
+	if err := json.Unmarshal([]byte(argsJSON), &in); err != nil || len(in.Args) == 0 {
+		return "", fmt.Errorf("args required (e.g. [\"status\"])")
+	}
+	if err := validateGitArgs(in.Args); err != nil {
+		return "", err
+	}
+	ctx, cancel := context.WithTimeout(ctx, 120*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "git", in.Args...)
+	out, err := cmd.CombinedOutput()
+	s := string(out)
+	if len(s) > 40_000 {
+		s = s[:40_000] + "\n…[truncated]…"
+	}
+	if err != nil {
+		return fmt.Sprintf("%s\n[exit error: %v]", s, err), nil
+	}
+	if strings.TrimSpace(s) == "" {
+		return "ok (no output)", nil
+	}
+	return s, nil
+}
+
+func validateGitArgs(args []string) error {
+	sub := strings.ToLower(args[0])
+	allowed := map[string]bool{
+		"status": true, "diff": true, "log": true, "show": true,
+		"branch": true, "checkout": true, "switch": true, "add": true,
+		"commit": true, "push": true, "pull": true, "fetch": true,
+		"stash": true, "rev-parse": true, "remote": true,
+	}
+	if !allowed[sub] {
+		return fmt.Errorf("git subcommand %q not allowed (use status/diff/branch/checkout/add/commit/push/…)", sub)
+	}
+	// Block shell injection via git -c core.editor etc. is ok; block obvious footguns
+	joined := strings.Join(args, " ")
+	if strings.Contains(joined, ";") || strings.Contains(joined, "|") || strings.Contains(joined, "`") || strings.Contains(joined, "$(") {
+		return fmt.Errorf("git args contain shell metacharacters")
+	}
+	// push --force requires explicit env opt-in
+	if sub == "push" {
+		for _, a := range args[1:] {
+			al := strings.ToLower(a)
+			if al == "--force" || al == "-f" || al == "--force-with-lease" {
+				if os.Getenv("AGENTERM_ALLOW_GIT_FORCE") != "1" {
+					return fmt.Errorf("git push --force blocked (set AGENTERM_ALLOW_GIT_FORCE=1 to allow)")
+				}
+			}
+		}
+	}
+	return nil
 }
 
 type runShell struct{}
@@ -374,12 +516,16 @@ func resolveExistingFile(p string) (string, error) {
 }
 
 // DefaultBuiltins registers safe tools; shell optional.
+// str_replace + git are always on so the agent can apply real file/git changes
+// without requiring full run_shell.
 func DefaultBuiltins(enableShell bool) *Registry {
 	r := NewRegistry()
 	r.Register(listDir{})
 	r.Register(readFile{})
 	r.Register(writeFile{})
+	r.Register(strReplace{})
 	r.Register(findFiles{})
+	r.Register(gitCmd{})
 	if enableShell {
 		r.Register(runShell{})
 	}

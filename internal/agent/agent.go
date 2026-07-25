@@ -69,11 +69,12 @@ func workspaceHint() string {
 	return strings.TrimSpace(fmt.Sprintf(`
 Workspace (tool paths resolve here):
 - Current working directory: %s
-- Paths for read_file / list_dir / write_file / find_files are relative to that cwd, or absolute.
+- Paths for read_file / list_dir / write_file / str_replace / find_files / git are relative to that cwd, or absolute.
 - Do NOT invent prefixes like "repo/" or invent file names (no fake main.go/config.go lists).
 - Only report paths that appeared in tool results.
 - If the user names a project (e.g. sidb/oracle-database-operator), find_files or list_dir first, then read_file.
 - For "can you read X?" after a successful read_file: answer "Yes" (or "No" + why) in one short sentence.
+- For "can you do it" / apply / implement: use str_replace or write_file (and git if needed). Do not only print a plan.
 `, cwd))
 }
 
@@ -91,7 +92,13 @@ func (a *Agent) Reset() {
 
 // RunUserMessage appends a user message and runs the agent loop, emitting events.
 func (a *Agent) RunUserMessage(ctx context.Context, user string, emit func(Event)) error {
-	a.History = append(a.History, llm.Message{Role: llm.RoleUser, Content: user})
+	// Action requests: nudge the model in the same user turn so it executes tools.
+	payload := user
+	if isActionRequest(user) {
+		payload = user + "\n\n[agenterm] Execute now with tools (str_replace/write_file/git). Do not only print steps."
+		emit(Event{Kind: EventStatus, Text: "action mode: will apply changes via tools"})
+	}
+	a.History = append(a.History, llm.Message{Role: llm.RoleUser, Content: payload})
 
 	// Attach tools only when enabled and the turn is not pure small-talk.
 	// Skipping tools for greetings avoids a pointless second LLM round-trip
@@ -104,8 +111,13 @@ func (a *Agent) RunUserMessage(ctx context.Context, user string, emit func(Event
 		emit(Event{Kind: EventStatus, Text: "tools skipped (chat-only turn)"})
 	}
 
+	maxRounds := a.MaxToolRounds
+	if isActionRequest(user) && maxRounds < 12 {
+		maxRounds = 12 // branch + edit + commit may need more steps
+	}
+
 	toolsUsed := 0
-	for round := 0; round < a.MaxToolRounds; round++ {
+	for round := 0; round < maxRounds; round++ {
 		if err := ctx.Err(); err != nil {
 			emit(Event{Kind: EventError, Text: "cancelled"})
 			emit(Event{Kind: EventDone})
@@ -116,8 +128,15 @@ func (a *Agent) RunUserMessage(ctx context.Context, user string, emit func(Event
 		msgs := a.History
 		if toolsUsed > 0 {
 			msgs = append(append([]llm.Message{}, a.History...), llm.Message{
+				Role:    llm.RoleSystem,
+				Content: afterToolsAnswerHint(user, toolsUsed),
+			})
+		} else if isActionRequest(user) && round == 0 {
+			msgs = append(append([]llm.Message{}, a.History...), llm.Message{
 				Role: llm.RoleSystem,
-				Content: afterToolsAnswerHint(user),
+				Content: `The user wants real on-disk changes. Call tools now:
+1) read_file if needed, 2) str_replace or write_file, 3) git add/commit/push only if they asked.
+Do not answer with only a markdown plan or shell snippets.`,
 			})
 		}
 
@@ -137,12 +156,16 @@ func (a *Agent) RunUserMessage(ctx context.Context, user string, emit func(Event
 			}
 		}
 
-		// Multi-step tools allowed, but stop offering tools after a few rounds so we get an answer.
+		// Multi-step tools allowed; action tasks get more tool rounds before we force an answer.
+		toolCap := 4
+		if isActionRequest(user) {
+			toolCap = 10
+		}
 		roundTools := toolSchemas
-		if round > 0 && a.Cfg.EnableTools && a.Tools != nil && toolsUsed < 4 && round < 4 {
+		if round > 0 && a.Cfg.EnableTools && a.Tools != nil && toolsUsed < toolCap && round < toolCap {
 			roundTools = a.Tools.LLMTools()
 		}
-		if toolsUsed >= 4 || round >= 4 {
+		if toolsUsed >= toolCap || round >= toolCap {
 			roundTools = nil // force plain-text answer
 			emit(Event{Kind: EventStatus, Text: "final answer (no more tools)"})
 		}
@@ -232,7 +255,13 @@ func (s *streamBridge) OnStatus(text string) {
 }
 
 // afterToolsAnswerHint is injected only into the next model request (not history).
-func afterToolsAnswerHint(userQuestion string) string {
+func afterToolsAnswerHint(userQuestion string, toolsUsed int) string {
+	if isActionRequest(userQuestion) {
+		return fmt.Sprintf(`You have used %d tool call(s). Continue the user's request using ONLY real tool results.
+- If file/git changes are still incomplete, call more tools (str_replace/write_file/git).
+- If work is done, give a short confirmation of what changed on disk (paths + git result). Do not invent success.
+- Do not paste full file bodies or long plans.`, toolsUsed)
+	}
 	base := `You now have tool results above. Answer the user's latest question using ONLY those results.
 Rules:
 - Do not invent files, folders, or paths that did not appear in tool output.
@@ -240,13 +269,44 @@ Rules:
 - Prefer a short direct answer (a few sentences max).`
 	uq := strings.TrimSpace(userQuestion)
 	low := strings.ToLower(uq)
-	if (strings.Contains(low, "yes") && strings.Contains(low, "no")) ||
-		strings.HasPrefix(low, "can you") || strings.HasPrefix(low, "could you") ||
-		strings.Contains(low, "yes or no") || strings.Contains(low, "y/n") ||
-		strings.Contains(low, "can u ") || strings.Contains(low, "able to read") {
+	// "can you do it" is action, not yes/no — handled above.
+	if !isActionRequest(userQuestion) &&
+		((strings.Contains(low, "yes") && strings.Contains(low, "no")) ||
+			strings.Contains(low, "yes or no") || strings.Contains(low, "y/n") ||
+			(strings.HasPrefix(low, "can you") && strings.Contains(low, "read")) ||
+			strings.Contains(low, "able to read")) {
 		base += "\n- This is a yes/no style question: start with Yes or No, then one short line of detail."
 	}
 	return base
+}
+
+// isActionRequest is true when the user wants real on-disk / git changes, not advice only.
+func isActionRequest(user string) bool {
+	s := strings.ToLower(strings.TrimSpace(user))
+	if s == "" {
+		return false
+	}
+	// Short "do it" / "apply" follow-ups
+	switch strings.Join(strings.Fields(strings.Trim(s, "!.?")), " ") {
+	case "do it", "do this", "please do it", "go ahead", "apply it", "apply",
+		"make the change", "make the changes", "implement it", "just do it",
+		"can you do it", "could you do it", "yes do it", "ok do it", "yes apply":
+		return true
+	}
+	needles := []string{
+		"do it", "apply the", "apply these", "apply this", "make the change",
+		"implement ", "implement it", "write the", "update the readme", "update readme",
+		"edit the", "fix the", "create a branch", "create branch", "commit ",
+		"git commit", "git push", "push the", "refactor ", "add a section",
+		"improve the readme", "improve readme", "please apply", "go ahead and",
+		"make these changes", "make those changes",
+	}
+	for _, n := range needles {
+		if strings.Contains(s, n) {
+			return true
+		}
+	}
+	return false
 }
 
 func capToolResult(s string, max int) string {

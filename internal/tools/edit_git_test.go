@@ -1,0 +1,50 @@
+package tools
+
+import (
+	"context"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+)
+
+func TestStrReplaceAndGitAllowlist(t *testing.T) {
+	dir := t.TempDir()
+	cwd, _ := os.Getwd()
+	if err := os.Chdir(dir); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(cwd) })
+
+	path := filepath.Join(dir, "README.md")
+	if err := os.WriteFile(path, []byte("# Hello\n\nold line\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	r := DefaultBuiltins(false)
+	out, err := r.Run(context.Background(), "str_replace", `{"path":"README.md","old_string":"old line","new_string":"new line"}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out, "updated") {
+		t.Fatalf("out=%q", out)
+	}
+	data, _ := os.ReadFile(path)
+	if !strings.Contains(string(data), "new line") || strings.Contains(string(data), "old line") {
+		t.Fatalf("file not updated: %s", data)
+	}
+
+	if err := validateGitArgs([]string{"status"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := validateGitArgs([]string{"rm", "-rf", "/"}); err == nil {
+		t.Fatal("expected reject dangerous subcommand")
+	}
+	if err := validateGitArgs([]string{"push", "--force"}); err == nil {
+		t.Fatal("expected reject force push without env")
+	}
+}
+
+func TestIsActionRequest_viaAgentPackage(t *testing.T) {
+	// kept in agent tests; placeholder so tools package stays focused
+}
