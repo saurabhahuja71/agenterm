@@ -20,31 +20,86 @@ agenterm  ──►  Ollama / xAI / OpenAI  (/v1/chat/completions)
 - Optional **MCP** servers (HTTP streamable or stdio)
 - Single static **Go binary** — easy for GitHub users
 
-## Quick start
+## Quick start (Podman / Docker — any machine)
 
-### 1. Ollama (Linux)
+Yes: run the **TUI inside a container** so users only need Podman or Docker + a terminal. Ollama can stay on the host (or any remote URL).
+
+### 1. Ollama on the host (or remote)
 
 ```bash
-# install ollama, then:
 ollama pull llama3.2
-ollama serve   # if not already running
+ollama serve   # listens on :11434
 ```
 
-### 2. Build agenterm
+### 2. Run agenterm in a container
 
 ```bash
 git clone git@github.com:saurabhahuja71/agenterm.git
 cd agenterm
-go build -o agenterm ./cmd/agenterm
-./agenterm init          # writes ~/.agenterm/config.toml
-./agenterm --ping        # check endpoint
-./agenterm               # open TUI
+
+# one-liner helper (builds image if needed, -it TUI, host network)
+chmod +x scripts/run-podman.sh
+./scripts/run-podman.sh --ping
+./scripts/run-podman.sh
 ```
+
+**Manual Podman** (Linux — host Ollama on localhost):
+
+```bash
+podman build -t agenterm:latest .
+
+# Ensure user socket if you use compose elsewhere:
+# systemctl --user enable --now podman.socket
+
+podman run --rm -it --network=host \
+  -e AGENTERM_BASE_URL=http://127.0.0.1:11434/v1 \
+  -e AGENTERM_MODEL=llama3.2 \
+  -v "$HOME/.agenterm:/home/agenterm/.agenterm:Z" \
+  agenterm:latest
+```
+
+**Compose:**
+
+```bash
+export DOCKER_HOST=unix:///run/user/$(id -u)/podman/podman.sock   # rootless Podman
+podman compose run --rm agenterm
+# or: docker compose run --rm agenterm
+```
+
+| Flag / need | Why |
+|-------------|-----|
+| `-it` / `tty: true` | Interactive **TUI** needs a real terminal |
+| `--network=host` (Linux) | Container can reach **host** Ollama at `127.0.0.1:11434` |
+| volume `~/.agenterm` | Persist config |
+
+**Remote Ollama** (no host network required for the LLM):
+
+```bash
+./scripts/run-podman.sh --base-url http://192.168.1.50:11434/v1 -m qwen2.5
+# or
+AGENTERM_BASE_URL=http://gpu-box:11434/v1 ./scripts/run-podman.sh
+```
+
+**macOS Docker:** host Ollama is not `127.0.0.1` inside the container — use  
+`http://host.docker.internal:11434/v1` (the run script sets this on Darwin).
 
 ### 3. Chat
 
 Type a message, press **Enter**.  
 `/help` · `/model llama3.2` · `/clear` · **Ctrl+C** quit.
+
+---
+
+## Quick start (native Go binary)
+
+```bash
+git clone git@github.com:saurabhahuja71/agenterm.git
+cd agenterm
+go build -o agenterm ./cmd/agenterm
+./agenterm init
+./agenterm --ping
+./agenterm
+```
 
 ---
 

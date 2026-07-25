@@ -1,0 +1,37 @@
+# Terminal agent as a container. Requires a TTY:
+#   podman compose run --rm agenterm
+#   docker compose run --rm agenterm
+#
+# Ollama is expected on the host (or set AGENTERM_BASE_URL to a remote server).
+# --network=host makes 127.0.0.1:11434 work from inside the container on Linux.
+
+services:
+  agenterm:
+    build:
+      context: .
+    image: agenterm:latest
+    container_name: agenterm
+    # Interactive TUI
+    stdin_open: true
+    tty: true
+    # Reach host Ollama / MCP on localhost (Linux)
+    network_mode: host
+    environment:
+      AGENTERM_PROVIDER: ${AGENTERM_PROVIDER:-ollama-local}
+      AGENTERM_BASE_URL: ${AGENTERM_BASE_URL:-http://127.0.0.1:11434/v1}
+      AGENTERM_MODEL: ${AGENTERM_MODEL:-llama3.2}
+      AGENTERM_API_KEY: ${AGENTERM_API_KEY:-ollama}
+      # Cloud keys (optional)
+      XAI_API_KEY: ${XAI_API_KEY:-}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      TERM: xterm-256color
+      COLORTERM: truecolor
+    volumes:
+      # Persist config + future session data
+      - ${HOME}/.agenterm:/home/agenterm/.agenterm:Z
+      # Optional: let tools see your project (read-write)
+      # - ${PWD}:/work:Z
+    working_dir: /home/agenterm
+    # SELinux rootless Podman
+    security_opt:
+      - label=disable

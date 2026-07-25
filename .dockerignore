@@ -1,0 +1,10 @@
+.git
+agenterm
+bin
+*.md
+docs
+.idea
+.vscode
+*.swp
+.env
+.env.*
