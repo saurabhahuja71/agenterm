@@ -197,33 +197,46 @@ You will not match **hosted Grok** by only polishing the TUI.
 
 ### Phase A — Feel snappy & trustworthy (high ROI)
 
-1. **@path** mentions + better repo root detection  
-2. **`grep` / `search_code` tool**  
-3. **tool_choice** + stronger Ollama tool prompts  
-4. Collapsible tools always; emphasize final answer  
-5. **Regenerate / stop / edit last**  
-6. Session **history** on disk  
+1. ~~**@path** mentions + better repo root detection~~ **done (v0.2.0)**  
+2. ~~**`grep` / `search_code` tool**~~ **done**  
+3. ~~**tool_choice** auto/none~~ **done (basic)**  
+4. ~~Quiet/collapsible tools~~ **done earlier**  
+5. ~~**Regenerate** (`/retry`) / stop (Esc)~~ **done**; full “edit last prompt” still open  
+6. ~~Session **history** on disk~~ **done** (`/save`, `/load`, `/sessions`, auto `last`)  
 
 ### Phase B — Real coding agent
 
-7. Diff-based **edit_file**  
-8. **run_tests** / configurable check command  
-9. Git status + proposed diff preview  
-10. Permission prompts for write/shell  
-11. Context compaction  
+7. ~~Diff-based **str_replace**~~ **done earlier** (full unified-diff apply still open)  
+8. ~~**run_tests** / configurable `test_command`~~ **done**  
+9. ~~Git status in `/status` + `git` tool~~ **done**  
+10. Permission prompts for write/shell — **partial** (shell still opt-in; no interactive approve UI yet)  
+11. ~~Context compaction~~ **done** (`/compact` + auto soft compact)  
 
 ### Phase C — Product polish
 
-12. Multipane TUI (chat | files | diff)  
-13. Project rules file (`AGENTS.md` / `.agenterm/rules`)  
-14. First-class **xAI** preset with good defaults  
-15. Optional local embeddings for codebase Q&A  
+12. Multipane TUI (chat | files | diff) — **todo**  
+13. ~~Project rules file (`AGENTS.md` / `.agenterm/rules`)~~ **done**  
+14. First-class **xAI** preset with good defaults — **partial** (preset exists)  
+15. Optional local embeddings for codebase Q&A — **todo**  
 
 ### Phase D — Optional “Grok-like” extras
 
-16. Web search via MCP  
-17. Vision  
-18. Voice (usually out of scope for terminal)  
+16. Web search via MCP — **todo**  
+17. Vision — **todo**  
+18. Voice — **todo**  
+
+### v0.2.0 shipped (this batch)
+
+| Feature | How to use |
+|---------|------------|
+| `@file` / `@dir` | `explain @README.md` or `@internal/agent` |
+| `grep` | model tool or ask “search for Foo in *.go” |
+| `run_tests` | after code edits; config `test_command` |
+| `/retry` | regenerate last answer |
+| `/save` `/load` `/sessions` | disk history under `~/.agenterm/sessions` |
+| `/compact` | shrink tool history |
+| `AGENTS.md` | auto-loaded into system prompt |
+| Project root | shown in workspace hint |
 
 ---
 

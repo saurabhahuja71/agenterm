@@ -16,7 +16,7 @@ import (
 )
 
 var (
-	version = "0.1.9"
+	version = "0.2.0"
 	flagProvider string
 	flagModel    string
 	flagBaseURL  string
@@ -127,7 +127,10 @@ func runTUI(cmd *cobra.Command, args []string) error {
 		return nil
 	}
 
-	reg := tools.DefaultBuiltins(eff.EnableShell)
+	reg := tools.DefaultBuiltinsOpts(tools.BuiltinOpts{
+		EnableShell: eff.EnableShell,
+		TestCommand: eff.TestCommand,
+	})
 
 	var mcpMgr *mcpclient.Manager
 	if !flagNoMCP {
@@ -143,6 +146,15 @@ func runTUI(cmd *cobra.Command, args []string) error {
 	}
 
 	ag := agent.New(eff, client, reg)
+
+	// Auto-resume last session if AGENTERM_SESSION is set
+	if sid := os.Getenv("AGENTERM_SESSION"); sid != "" {
+		if err := ag.LoadSession(sid); err != nil {
+			fmt.Fprintf(os.Stderr, "session load %s: %v\n", sid, err)
+		} else {
+			fmt.Fprintf(os.Stderr, "  resumed session %s\n", sid)
+		}
+	}
 
 	fmt.Fprintf(os.Stderr, "agenterm %s  config=%s\n", version, path)
 	fmt.Fprintf(os.Stderr, "  %s\n", eff.Summary())

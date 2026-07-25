@@ -26,6 +26,8 @@ max_tokens = 0
 # Set false or run: agenterm --no-tools   for pure chat speed.
 enable_tools = true
 enable_shell = false
+# Default for run_tests tool (empty = auto: go test ./... | make test)
+# test_command = "go test ./..."
 
 system_prompt = """
 You are agenterm, a fast terminal coding assistant that CAN change files on disk.

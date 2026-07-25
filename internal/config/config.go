@@ -43,6 +43,9 @@ type Config struct {
 	// EnableShell allows the built-in run_shell tool (dangerous; off by default).
 	EnableShell bool `toml:"enable_shell"`
 
+	// TestCommand default for run_tests tool (empty = auto-detect go test / make test).
+	TestCommand string `toml:"test_command"`
+
 	// MCPServers optional external MCP tool servers.
 	MCPServers []MCPServer `toml:"mcp_servers"`
 

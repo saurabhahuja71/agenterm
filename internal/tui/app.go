@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"os/exec"
 	"regexp"
 	"strings"
 	"time"
@@ -335,6 +336,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.waitSecs = 0
 			m.status = "ready"
 			m.cancel = nil
+			if _, err := m.deps.Agent.SaveSession("last"); err == nil {
+				// rolling checkpoint
+			}
 			m.refreshViewport()
 		}
 		// Keep reading the channel
@@ -354,6 +358,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.status = "ready"
 		m.events = nil
 		m.cancel = nil
+		// Auto-save rolling session after each turn (best-effort).
+		if _, err := m.deps.Agent.SaveSession("last"); err == nil {
+			// quiet — path only in /sessions
+		}
 		m.refreshViewport()
 	}
 
@@ -377,9 +385,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 func (m model) handleSubmit(text string) (tea.Model, tea.Cmd) {
 	if strings.HasPrefix(text, "/") {
-		var cmd tea.Cmd
-		m, cmd = m.handleSlash(text)
-		return m, cmd
+		return m.handleSlash(text)
 	}
 	m.lines = append(m.lines, chatLine{role: "user", text: text})
 	m.ensureStream().Reset()
@@ -419,7 +425,7 @@ func waitNext(ch <-chan agent.Event) tea.Cmd {
 	}
 }
 
-func (m model) handleSlash(text string) (model, tea.Cmd) {
+func (m model) handleSlash(text string) (tea.Model, tea.Cmd) {
 	parts := strings.Fields(text)
 	cmd := strings.ToLower(parts[0])
 	switch cmd {
@@ -431,9 +437,15 @@ func (m model) handleSlash(text string) (model, tea.Cmd) {
 		m.deps.Agent.Reset()
 		m.lines = []chatLine{{role: "system", text: "history cleared"}}
 	case "/status":
-		m.lines = append(m.lines, chatLine{role: "system", text: m.deps.Summary + "\nstatus: " + m.status})
+		st := m.deps.Summary + "\nstatus: " + m.status
+		st += "\nworkspace: " + mustCwd()
+		if b, err := runGitStatusShort(); err == nil && b != "" {
+			st += "\ngit:\n" + b
+		}
+		m.lines = append(m.lines, chatLine{role: "system", text: st})
 	case "/model", "/models":
-		return m.handleModelCmd(parts)
+		mod, cmd := m.handleModelCmd(parts)
+		return mod, cmd
 	case "/tools":
 		if len(parts) < 2 {
 			state := "on"
@@ -459,6 +471,67 @@ func (m model) handleSlash(text string) (model, tea.Cmd) {
 	case "/quiet":
 		m.verbose = false
 		m.lines = append(m.lines, chatLine{role: "system", text: "quiet mode — compact tools (default). /verbose for full traces"})
+	case "/retry", "/regenerate", "/redo":
+		if m.busy {
+			m.lines = append(m.lines, chatLine{role: "error", text: "busy — wait or Esc cancel first"})
+			m.refreshViewport()
+			return m, nil
+		}
+		prev := m.deps.Agent.PopLastExchange()
+		if prev == "" {
+			m.lines = append(m.lines, chatLine{role: "error", text: "nothing to retry"})
+			m.refreshViewport()
+			return m, nil
+		}
+		// Drop last user+assistant lines from UI if present
+		for len(m.lines) > 0 {
+			r := m.lines[len(m.lines)-1].role
+			if r == "user" || r == "assistant" || r == "tool" || r == "error" || r == "assistant-stream" {
+				m.lines = m.lines[:len(m.lines)-1]
+				if r == "user" {
+					break
+				}
+				continue
+			}
+			break
+		}
+		m.lines = append(m.lines, chatLine{role: "system", text: "retrying…"})
+		m.refreshViewport()
+		return m.handleSubmit(prev)
+	case "/save":
+		id := ""
+		if len(parts) >= 2 {
+			id = parts[1]
+		}
+		path, err := m.deps.Agent.SaveSession(id)
+		if err != nil {
+			m.lines = append(m.lines, chatLine{role: "error", text: "save: " + err.Error()})
+		} else {
+			m.lines = append(m.lines, chatLine{role: "system", text: "saved session → " + path})
+		}
+	case "/sessions", "/history":
+		list, err := agent.ListSessions(15)
+		if err != nil {
+			m.lines = append(m.lines, chatLine{role: "error", text: err.Error()})
+		} else if len(list) == 0 {
+			m.lines = append(m.lines, chatLine{role: "system", text: "no sessions in ~/.agenterm/sessions\n/save to create one"})
+		} else {
+			m.lines = append(m.lines, chatLine{role: "system", text: "sessions:\n  " + strings.Join(list, "\n  ") + "\n\nLoad: /load <id>"})
+		}
+	case "/load":
+		if len(parts) < 2 {
+			m.lines = append(m.lines, chatLine{role: "system", text: "usage: /load <session-id>"})
+		} else if err := m.deps.Agent.LoadSession(parts[1]); err != nil {
+			m.lines = append(m.lines, chatLine{role: "error", text: err.Error()})
+		} else {
+			m.lines = []chatLine{
+				{role: "system", text: "loaded session " + parts[1]},
+				{role: "system", text: m.deps.Summary},
+			}
+		}
+	case "/compact":
+		m.deps.Agent.CompactHistory()
+		m.lines = append(m.lines, chatLine{role: "system", text: "compacted old tool payloads in history"})
 	default:
 		m.lines = append(m.lines, chatLine{role: "error", text: "unknown command " + cmd + " — try /help"})
 	}
@@ -471,33 +544,57 @@ func helpText() string {
 Commands:
   /help              This help
   /clear             Clear conversation
-  /status            Provider · model · URL
-  /model             List models from the server (current marked *)
-  /model <name>      Switch model for this chat (immediate, like Grok)
-  /models            Same as /model
-  /tools on|off      Toggle function tools (session; off = faster chat)
-  /quiet             Compact UI (default): short tool lines, hide tool JSON dumps
-  /verbose           Full tool args/output and model “let me read…” text
-  /quit              Exit (or Ctrl+C when idle)
+  /status            Provider · model · URL · git short status
+  /model             List models (* = current)
+  /model <name>      Switch model mid-chat
+  /tools on|off      Toggle function tools
+  /quiet | /verbose  Compact vs full tool traces
+  /retry             Regenerate last reply (same user message)
+  /save [id]         Save session to ~/.agenterm/sessions
+  /sessions          List saved sessions
+  /load <id>         Resume a saved session
+  /compact           Shrink old tool payloads in memory
+  /quit              Exit
+
+Mentions (like Cursor/Grok):
+  @README.md         Attach file contents to your message
+  @internal/agent    Attach directory listing
 
 Examples:
   /model qwen2.5-coder:32b
-  /tools off
-  /quiet
+  explain @README.md SEO issues
+  /retry
 
 Keys:
   Enter           Send
-  Esc             Cancel in-flight reply (does not quit)
+  Esc             Cancel in-flight reply
   Ctrl+C          Cancel if busy; quit when idle
   Ctrl+L          Clear history
   PgUp / PgDn     Scroll
-
-Ollama:
-  Local default   http://127.0.0.1:11434/v1 (SSH tunnel to remote is fine)
-  Edit            ~/.agenterm/config.toml
-  Fast chat       agenterm --no-tools   or   enable_tools = false
-  Remote example  providers.ollama-remote.base_url = "http://gpu-host:11434/v1"
 `)
+}
+
+func mustCwd() string {
+	c, err := os.Getwd()
+	if err != nil {
+		return "."
+	}
+	return c
+}
+
+func runGitStatusShort() (string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "git", "status", "-sb")
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return "", err
+	}
+	s := strings.TrimSpace(string(out))
+	if len(s) > 800 {
+		s = s[:800] + "…"
+	}
+	return s, nil
 }
 
 // handleModelCmd implements Grok-style mid-chat model switch and listing.

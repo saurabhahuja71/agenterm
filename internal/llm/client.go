@@ -73,6 +73,9 @@ type ChatRequest struct {
 	Model       string    `json:"model"`
 	Messages    []Message `json:"messages"`
 	Tools       []Tool    `json:"tools,omitempty"`
+	// ToolChoice: "auto" | "none" | or {"type":"function","function":{"name":"..."}}
+	// Omit when empty. Helps Ollama/OpenAI skip tools for pure chat.
+	ToolChoice  any       `json:"tool_choice,omitempty"`
 	Temperature float64   `json:"temperature,omitempty"`
 	MaxTokens   int       `json:"max_tokens,omitempty"`
 	Stream      bool      `json:"stream"`

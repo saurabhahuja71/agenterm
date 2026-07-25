@@ -515,18 +515,30 @@ func resolveExistingFile(p string) (string, error) {
 	return "", fmt.Errorf("file not found: %s (cwd-relative; try find_files or list_dir)", p)
 }
 
+// BuiltinOpts configures optional tools.
+type BuiltinOpts struct {
+	EnableShell bool
+	TestCommand string
+}
+
 // DefaultBuiltins registers safe tools; shell optional.
-// str_replace + git are always on so the agent can apply real file/git changes
-// without requiring full run_shell.
+// str_replace + git + grep are always on so the agent can explore and apply changes.
 func DefaultBuiltins(enableShell bool) *Registry {
+	return DefaultBuiltinsOpts(BuiltinOpts{EnableShell: enableShell})
+}
+
+// DefaultBuiltinsOpts registers tools with options.
+func DefaultBuiltinsOpts(opts BuiltinOpts) *Registry {
 	r := NewRegistry()
 	r.Register(listDir{})
 	r.Register(readFile{})
 	r.Register(writeFile{})
 	r.Register(strReplace{})
 	r.Register(findFiles{})
+	r.Register(grepTool{})
 	r.Register(gitCmd{})
-	if enableShell {
+	r.Register(runTests{DefaultCmd: opts.TestCommand})
+	if opts.EnableShell {
 		r.Register(runShell{})
 	}
 	return r

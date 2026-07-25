@@ -45,11 +45,15 @@ func New(cfg config.Config, client *llm.Client, reg *tools.Registry) *Agent {
 	e := cfg.Effective()
 	hist := []llm.Message{}
 	sys := strings.TrimSpace(e.SystemPrompt)
+	extra := workspaceHint()
+	if rules := loadProjectRules(); rules != "" {
+		extra = extra + "\n\n" + rules
+	}
 	if sys != "" {
-		sys = sys + "\n\n" + workspaceHint()
+		sys = sys + "\n\n" + extra
 		hist = append(hist, llm.Message{Role: llm.RoleSystem, Content: sys})
 	} else {
-		hist = append(hist, llm.Message{Role: llm.RoleSystem, Content: workspaceHint()})
+		hist = append(hist, llm.Message{Role: llm.RoleSystem, Content: extra})
 	}
 	return &Agent{
 		Cfg:           e,
@@ -66,16 +70,18 @@ func workspaceHint() string {
 	if err != nil || cwd == "" {
 		cwd = "."
 	}
+	root := findRepoRoot()
 	return strings.TrimSpace(fmt.Sprintf(`
 Workspace (tool paths resolve here):
 - Current working directory: %s
-- Paths for read_file / list_dir / write_file / str_replace / find_files / git are relative to that cwd, or absolute.
+- Detected project root: %s
+- Paths for read_file / list_dir / write_file / str_replace / find_files / grep / git / run_tests are relative to cwd (or absolute).
+- User can attach context with @path (e.g. @README.md @internal/agent).
 - Do NOT invent prefixes like "repo/" or invent file names (no fake main.go/config.go lists).
-- Only report paths that appeared in tool results.
-- If the user names a project (e.g. sidb/oracle-database-operator), find_files or list_dir first, then read_file.
-- For "can you read X?" after a successful read_file: answer "Yes" (or "No" + why) in one short sentence.
-- For "can you do it" / apply / implement: use str_replace or write_file (and git if needed). Do not only print a plan.
-`, cwd))
+- Only report paths that appeared in tool results or @mentions.
+- Prefer grep to search code; find_files to locate names; str_replace to edit; run_tests after code changes.
+- For "can you do it" / apply / implement: use tools. Do not only print a plan.
+`, cwd, root))
 }
 
 // Reset clears chat history but keeps system prompt.
@@ -90,12 +96,67 @@ func (a *Agent) Reset() {
 	}
 }
 
+// LastUserText is the last user-visible prompt (for /retry).
+func (a *Agent) LastUserText() string {
+	for i := len(a.History) - 1; i >= 0; i-- {
+		if a.History[i].Role == llm.RoleUser {
+			// strip agenterm injects
+			s := a.History[i].Content
+			if j := strings.Index(s, "\n\n[agenterm]"); j >= 0 {
+				s = s[:j]
+			}
+			if j := strings.Index(s, "\n\n---\nAttached context"); j >= 0 {
+				s = s[:j]
+			}
+			return strings.TrimSpace(s)
+		}
+	}
+	return ""
+}
+
+// PopLastExchange removes the last user message and everything after it (for /retry).
+func (a *Agent) PopLastExchange() string {
+	user := a.LastUserText()
+	for i := len(a.History) - 1; i >= 0; i-- {
+		if a.History[i].Role == llm.RoleUser {
+			a.History = a.History[:i]
+			return user
+		}
+	}
+	return ""
+}
+
+// CompactHistory drops old tool payloads if history is large (keeps recent turns).
+func (a *Agent) CompactHistory() {
+	const softLimit = 80_000
+	total := 0
+	for _, m := range a.History {
+		total += len(m.Content)
+	}
+	if total < softLimit {
+		return
+	}
+	// Shrink older tool messages
+	for i := 0; i < len(a.History)-6; i++ {
+		if a.History[i].Role == llm.RoleTool && len(a.History[i].Content) > 500 {
+			a.History[i].Content = a.History[i].Content[:500] + "\n…[compacted]…"
+		}
+	}
+}
+
 // RunUserMessage appends a user message and runs the agent loop, emitting events.
 func (a *Agent) RunUserMessage(ctx context.Context, user string, emit func(Event)) error {
+	a.CompactHistory()
+
+	// @path mentions → attach file/dir context
+	payload, attached := expandMentions(user)
+	if attached != "" {
+		emit(Event{Kind: EventStatus, Text: "attached @" + attached})
+	}
+
 	// Action requests: nudge the model in the same user turn so it executes tools.
-	payload := user
 	if isActionRequest(user) {
-		payload = user + "\n\n[agenterm] Execute now with tools (str_replace/write_file/git). Do not only print steps."
+		payload = payload + "\n\n[agenterm] Execute now with tools (str_replace/write_file/git/grep/run_tests). Do not only print steps."
 		emit(Event{Kind: EventStatus, Text: "action mode: will apply changes via tools"})
 	}
 	a.History = append(a.History, llm.Message{Role: llm.RoleUser, Content: payload})
@@ -105,6 +166,10 @@ func (a *Agent) RunUserMessage(ctx context.Context, user string, emit func(Event
 	// (common with Ollama models that eagerly call list_dir on "hi").
 	var toolSchemas []llm.Tool
 	attachTools := a.Cfg.EnableTools && a.Tools != nil && !isTrivialChat(user)
+	// @mentions or action → always allow tools
+	if a.Cfg.EnableTools && a.Tools != nil && (attached != "" || isActionRequest(user)) {
+		attachTools = true
+	}
 	if attachTools {
 		toolSchemas = a.Tools.LLMTools()
 	} else if a.Cfg.EnableTools && a.Tools != nil && isTrivialChat(user) {
@@ -171,6 +236,13 @@ Do not answer with only a markdown plan or shell snippets.`,
 		}
 		if len(roundTools) > 0 {
 			req.Tools = roundTools
+			req.ToolChoice = "auto"
+			if isActionRequest(user) && toolsUsed == 0 && round == 0 {
+				// Encourage tool use on first action turn (OpenAI-compatible; Ollama may ignore).
+				req.ToolChoice = "auto"
+			}
+		} else if !attachTools && isTrivialChat(user) {
+			req.ToolChoice = "none"
 		}
 
 		emit(Event{Kind: EventStatus, Text: fmt.Sprintf("calling %s (round %d)…", a.Cfg.Model, round+1)})
