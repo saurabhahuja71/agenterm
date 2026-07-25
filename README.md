@@ -11,6 +11,61 @@ agenterm  ──►  Ollama / xAI / OpenAI  (/v1/chat/completions)
    └── tools ──► built-in (files…) + MCP (e.g. mcp-demo)
 ```
 
+## Two ways to run (pick one)
+
+| Mode | Best when | Limitations |
+|------|-----------|-------------|
+| **Native binary** | Daily use, full host access, no container networking quirks | Need a matching OS/arch binary (or Go toolchain) |
+| **Podman / Docker** | “Just run an image”, locked-down hosts, CI | Needs `-it`; host Ollama needs `--network=host` (Linux) or a remote URL |
+
+Both share the same config (`~/.agenterm/config.toml`) and CLI flags.
+
+### A) Install native binary (recommended)
+
+**From GitHub Releases** (after [v0.1.0](https://github.com/saurabhahuja71/agenterm/releases)):
+
+```bash
+# auto-detect OS/arch → ~/.local/bin/agenterm
+curl -fsSL https://raw.githubusercontent.com/saurabhahuja71/agenterm/main/scripts/install.sh | bash
+
+agenterm --version
+agenterm init
+agenterm --ping
+agenterm
+```
+
+Manual download:
+
+```bash
+# example: Linux amd64
+curl -fsSL -o agenterm \
+  https://github.com/saurabhahuja71/agenterm/releases/latest/download/agenterm-linux-amd64
+chmod +x agenterm && ./agenterm
+```
+
+**From source:**
+
+```bash
+git clone https://github.com/saurabhahuja71/agenterm.git
+cd agenterm
+make build          # → ./agenterm
+# or: go install github.com/saurabhahuja71/agenterm/cmd/agenterm@latest
+./agenterm
+```
+
+### B) Container (Podman / Docker)
+
+Run the **TUI inside a container** so users only need Podman or Docker + a terminal. Ollama can stay on the host (or any remote URL).
+
+**Published image** (after release):
+
+```bash
+podman run --rm -it --network=host \
+  -e AGENTERM_BASE_URL=http://127.0.0.1:11434/v1 \
+  -v "$HOME/.agenterm:/home/agenterm/.agenterm:Z" \
+  ghcr.io/saurabhahuja71/agenterm:v0.1.0
+```
+
 ## Features
 
 - Full-screen **terminal UI** (Bubble Tea): streaming replies, tool traces, dark theme
@@ -18,11 +73,11 @@ agenterm  ──►  Ollama / xAI / OpenAI  (/v1/chat/completions)
 - Config + flags for **local or remote** Ollama / cloud providers
 - **Tool calling** loop (when the model supports tools)
 - Optional **MCP** servers (HTTP streamable or stdio)
-- Single static **Go binary** — easy for GitHub users
+- **Native binaries** + **container image** for every release
 
-## Quick start (Podman / Docker — any machine)
+## Quick start (Podman / Docker from source)
 
-Yes: run the **TUI inside a container** so users only need Podman or Docker + a terminal. Ollama can stay on the host (or any remote URL).
+Yes: build the image locally if you have not pulled from GHCR yet.
 
 ### 1. Ollama on the host (or remote)
 
@@ -223,3 +278,39 @@ configs/config.example.toml
 ## License
 
 MIT (or your choice when you publish).
+
+---
+
+## Releases
+
+GitHub Actions builds **multi-platform binaries** and a **GHCR container** on every version tag:
+
+| Asset | Platforms |
+|-------|-----------|
+| `agenterm-linux-amd64` | Linux x86_64 |
+| `agenterm-linux-arm64` | Linux aarch64 |
+| `agenterm-darwin-amd64` | macOS Intel |
+| `agenterm-darwin-arm64` | macOS Apple Silicon |
+| `agenterm-windows-amd64.exe` | Windows |
+| `ghcr.io/saurabhahuja71/agenterm:vX.Y.Z` | Container |
+
+Maintainers:
+
+```bash
+# cut a release
+git tag v0.1.0
+git push origin v0.1.0
+# Actions → Release workflow publishes assets
+
+# local cross-build only
+make dist VERSION=0.1.0
+```
+
+Published container:
+
+```bash
+podman pull ghcr.io/saurabhahuja71/agenterm:v0.1.0
+podman run --rm -it --network=host \
+  -v "$HOME/.agenterm:/home/agenterm/.agenterm:Z" \
+  ghcr.io/saurabhahuja71/agenterm:v0.1.0
+```

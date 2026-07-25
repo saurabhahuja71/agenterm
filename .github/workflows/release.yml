@@ -1,0 +1,181 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to release (e.g. v0.1.0) — must already exist or will be created from this ref"
+        required: false
+        default: ""
+
+permissions:
+  contents: write
+  packages: write
+
+env:
+  GO_VERSION: "1.25.x"
+
+jobs:
+  binaries:
+    name: Build binaries
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - goos: linux
+            goarch: amd64
+            ext: ""
+          - goos: linux
+            goarch: arm64
+            ext: ""
+          - goos: darwin
+            goarch: amd64
+            ext: ""
+          - goos: darwin
+            goarch: arm64
+            ext: ""
+          - goos: windows
+            goarch: amd64
+            ext: ".exe"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+
+      - name: Version from tag
+        id: ver
+        run: |
+          TAG="${GITHUB_REF_NAME}"
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" && -n "${{ inputs.tag }}" ]]; then
+            TAG="${{ inputs.tag }}"
+          fi
+          VERSION="${TAG#v}"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Build
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: "0"
+        run: |
+          VERSION="${{ steps.ver.outputs.version }}"
+          OUT="agenterm-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.ext }}"
+          go build -trimpath \
+            -ldflags="-s -w -X main.version=${VERSION}" \
+            -o "dist/${OUT}" \
+            ./cmd/agenterm
+          cd dist && sha256sum "${OUT}" > "${OUT}.sha256"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: agenterm-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: |
+            dist/agenterm-${{ matrix.goos }}-${{ matrix.goarch }}*
+          if-no-files-found: error
+
+  release:
+    name: GitHub Release
+    needs: binaries
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Collect assets
+        run: |
+          mkdir -p dist
+          find artifacts -type f -exec cp -v {} dist/ \;
+          ls -la dist/
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: agenterm ${{ github.ref_name }}
+          draft: false
+          prerelease: false
+          generate_release_notes: true
+          body: |
+            ## agenterm ${{ github.ref_name }}
+
+            Terminal AI agent — **native binaries** + **container**.
+
+            ### Native (no container limits)
+
+            ```bash
+            # Linux amd64 example
+            curl -fsSL -o agenterm \
+              https://github.com/saurabhahuja71/agenterm/releases/download/${{ github.ref_name }}/agenterm-linux-amd64
+            chmod +x agenterm
+            ./agenterm --ping
+            ./agenterm
+            ```
+
+            ### Container (Podman / Docker)
+
+            ```bash
+            podman run --rm -it --network=host \
+              -e AGENTERM_BASE_URL=http://127.0.0.1:11434/v1 \
+              -v "$HOME/.agenterm:/home/agenterm/.agenterm:Z" \
+              ghcr.io/saurabhahuja71/agenterm:${{ github.ref_name }}
+            ```
+
+            Or build from source: see README.
+
+            **Requires:** Ollama or any OpenAI-compatible API.
+          files: dist/*
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  container:
+    name: Publish container image
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Version
+        id: ver
+        run: |
+          TAG="${GITHUB_REF_NAME}"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "version=${TAG#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: |
+            ghcr.io/saurabhahuja71/agenterm:${{ steps.ver.outputs.tag }}
+            ghcr.io/saurabhahuja71/agenterm:latest
+          build-args: |
+            VERSION=${{ steps.ver.outputs.version }}
+          platforms: linux/amd64

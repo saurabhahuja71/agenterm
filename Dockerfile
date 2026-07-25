@@ -3,6 +3,8 @@
 FROM docker.io/library/golang:1.25-alpine AS build
 WORKDIR /src
 
+ARG VERSION=0.1.0
+
 RUN apk add --no-cache git ca-certificates
 ENV GOTOOLCHAIN=local CGO_ENABLED=0
 
@@ -11,7 +13,7 @@ RUN go mod download
 
 COPY . .
 RUN go mod tidy \
-    && go build -trimpath -ldflags="-s -w -X main.version=0.1.0" -o /out/agenterm ./cmd/agenterm
+    && go build -trimpath -ldflags="-s -w -X main.version=${VERSION}" -o /out/agenterm ./cmd/agenterm
 
 FROM docker.io/library/alpine:3.21
 RUN apk add --no-cache ca-certificates tzdata \
