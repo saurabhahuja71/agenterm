@@ -1,0 +1,12 @@
+/agenterm
+/bin/
+*.exe
+*.test
+*.out
+vendor/
+.idea/
+.vscode/
+*.swp
+.DS_Store
+.env
+.env.*

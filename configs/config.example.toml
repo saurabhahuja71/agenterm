@@ -1,0 +1,58 @@
+# Copy to ~/.agenterm/config.toml  (or: agenterm init)
+
+# Named preset: ollama-local | ollama-remote | xai | openai | custom
+provider = "ollama-local"
+
+# Chat model (Ollama tag or cloud model id)
+model = "llama3.2"
+
+# OpenAI-compatible root. For Ollama always include /v1
+# Local:
+#   base_url = "http://127.0.0.1:11434/v1"
+# Remote Ollama on another Linux box:
+#   base_url = "http://192.168.1.50:11434/v1"
+base_url = "http://127.0.0.1:11434/v1"
+
+# Ollama accepts any key; cloud providers need a real secret.
+# Prefer env: AGENTERM_API_KEY, OLLAMA_API_KEY, XAI_API_KEY, OPENAI_API_KEY
+api_key = "ollama"
+
+temperature = 0.7
+max_tokens = 0
+enable_tools = true
+enable_shell = false
+
+system_prompt = """
+You are agenterm, a fast terminal coding assistant.
+Be concise. Use tools when helpful.
+"""
+
+# --- Provider presets (switch with provider = "…") ---
+
+[providers.ollama-local]
+base_url = "http://127.0.0.1:11434/v1"
+api_key = "ollama"
+model = "llama3.2"
+
+[providers.ollama-remote]
+# Change host to your remote Ollama server
+base_url = "http://127.0.0.1:11434/v1"
+api_key = "ollama"
+model = "llama3.2"
+
+[providers.xai]
+base_url = "https://api.x.ai/v1"
+# api_key from env XAI_API_KEY
+model = "grok-3"
+
+[providers.openai]
+base_url = "https://api.openai.com/v1"
+# api_key from env OPENAI_API_KEY
+model = "gpt-4o-mini"
+
+# --- Optional MCP tool servers ---
+
+[[mcp_servers]]
+name = "mcp-demo"
+enabled = false
+url = "http://127.0.0.1:8080/mcp"
