@@ -46,22 +46,26 @@ type chatLine struct {
 }
 
 type model struct {
-	deps     Deps
-	vp       viewport.Model
-	ta       textarea.Model
-	lines    []chatLine
-	width    int
-	height   int
-	busy     bool
-	status   string
-	stream   strings.Builder
-	renderer *glamour.TermRenderer
-	cancel   context.CancelFunc
-	events   <-chan agent.Event
+	deps       Deps
+	vp         viewport.Model
+	ta         textarea.Model
+	lines      []chatLine
+	width      int
+	height     int
+	busy       bool
+	status     string
+	stream     strings.Builder
+	renderer   *glamour.TermRenderer
+	cancel     context.CancelFunc
+	events     <-chan agent.Event
+	busySince  time.Time
+	gotToken   bool
+	waitSecs   int
 }
 
 type streamEvMsg agent.Event
 type streamClosedMsg struct{}
+type busyTickMsg time.Time
 
 func New(deps Deps) model {
 	ta := textarea.New()
@@ -92,7 +96,7 @@ func New(deps Deps) model {
 		lines: []chatLine{
 			{role: "system", text: "agenterm — snappy terminal agent (Ollama / OpenAI-compatible + MCP)"},
 			{role: "system", text: "Endpoint: " + deps.Summary},
-			{role: "system", text: "Enter send · Ctrl+C quit · /help · /model · /tools"},
+			{role: "system", text: "Enter send · Esc cancel · Ctrl+C quit · /help · /model · /tools"},
 		},
 	}
 	m.refreshViewport()
@@ -101,6 +105,12 @@ func New(deps Deps) model {
 
 func (m model) Init() tea.Cmd {
 	return textarea.Blink
+}
+
+func busyTick() tea.Cmd {
+	return tea.Tick(time.Second, func(t time.Time) tea.Msg {
+		return busyTickMsg(t)
+	})
 }
 
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -129,7 +139,22 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case tea.KeyMsg:
 		switch msg.String() {
+		case "esc":
+			// Cancel in-flight generation without quitting the TUI.
+			if m.busy && m.cancel != nil {
+				m.cancel()
+				m.status = "cancelling… (Esc)"
+				m.refreshViewport()
+				return m, nil
+			}
 		case "ctrl+c":
+			if m.busy && m.cancel != nil {
+				// First Ctrl+C cancels generation; second (when idle) quits.
+				m.cancel()
+				m.status = "cancelling… (Ctrl+C again to quit)"
+				m.refreshViewport()
+				return m, nil
+			}
 			if m.cancel != nil {
 				m.cancel()
 			}
@@ -152,14 +177,25 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m.handleSubmit(text)
 		}
 
+	case busyTickMsg:
+		if m.busy && !m.gotToken {
+			m.waitSecs = int(time.Since(m.busySince).Seconds())
+			m.status = fmt.Sprintf("waiting for %s… %ds (Ollama may be loading model; Esc cancel)", m.deps.Agent.Cfg.Model, m.waitSecs)
+			m.refreshViewport()
+			return m, busyTick()
+		}
+
 	case streamEvMsg:
 		ev := agent.Event(msg)
 		switch ev.Kind {
 		case agent.EventToken:
+			m.gotToken = true
 			m.stream.WriteString(ev.Text)
 			m.upsertStreamingAssistant(m.stream.String())
+			m.status = "streaming…"
 			m.refreshViewport()
 		case agent.EventToolStart:
+			m.gotToken = true
 			m.flushStreamAsLine()
 			m.lines = append(m.lines, chatLine{
 				role: "tool",
@@ -186,6 +222,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case agent.EventDone:
 			m.flushStreamAsLine()
 			m.busy = false
+			m.gotToken = false
+			m.waitSecs = 0
 			m.status = "ready"
 			m.cancel = nil
 			m.refreshViewport()
@@ -198,6 +236,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case streamClosedMsg:
 		m.flushStreamAsLine()
 		m.busy = false
+		m.gotToken = false
+		m.waitSecs = 0
 		m.status = "ready"
 		m.events = nil
 		m.cancel = nil
@@ -224,12 +264,15 @@ func (m model) handleSubmit(text string) (tea.Model, tea.Cmd) {
 	m.lines = append(m.lines, chatLine{role: "user", text: text})
 	m.stream.Reset()
 	m.busy = true
-	m.status = "thinking…"
+	m.gotToken = false
+	m.waitSecs = 0
+	m.busySince = time.Now()
+	m.status = fmt.Sprintf("thinking… (%s)", m.deps.Agent.Cfg.Model)
 	m.refreshViewport()
 
 	ctx, cancel := context.WithCancel(context.Background())
 	m.cancel = cancel
-	ch := make(chan agent.Event, 128)
+	ch := make(chan agent.Event, 256)
 	m.events = ch
 	ag := m.deps.Agent
 
@@ -243,7 +286,7 @@ func (m model) handleSubmit(text string) (tea.Model, tea.Cmd) {
 		close(ch)
 	}()
 
-	return m, waitNext(ch)
+	return m, tea.Batch(waitNext(ch), busyTick())
 }
 
 func waitNext(ch <-chan agent.Event) tea.Cmd {
@@ -317,7 +360,8 @@ Examples:
 
 Keys:
   Enter           Send
-  Ctrl+C          Quit
+  Esc             Cancel in-flight reply (does not quit)
+  Ctrl+C          Cancel if busy; quit when idle
   Ctrl+L          Clear history
   PgUp / PgDn     Scroll
 
@@ -388,7 +432,14 @@ func (m model) handleModelCmd(parts []string) (model, tea.Cmd) {
 	m.status = "model: " + name
 	msg := fmt.Sprintf("model set to %s", name)
 	if prev != "" && prev != name {
-		msg = fmt.Sprintf("model: %s → %s  (applies to next message)", prev, name)
+		msg = fmt.Sprintf(
+			"model: %s → %s\n"+
+				"Next message uses the new model.\n"+
+				"Note: Ollama often unloads the old model and loads the new one on first request —\n"+
+				"32B models can sit on “thinking…” for 30s–several minutes with no tokens yet.\n"+
+				"Status bar shows a wait timer; Esc cancels. Tip: /clear if chat history is huge.",
+			prev, name,
+		)
 	}
 	m.lines = append(m.lines, chatLine{role: "system", text: msg})
 	m.refreshViewport()
@@ -468,7 +519,7 @@ func (m model) View() string {
 	} else {
 		header += styleStatus.Render("  ·  " + m.status)
 	}
-	help := styleHelp.Render("enter send · ctrl+c quit · /help · ctrl+l clear")
+	help := styleHelp.Render("enter send · esc cancel · ctrl+c quit · /help · /model · ctrl+l clear")
 	body := styleBox.Width(max(10, w-2)).Render(m.vp.View())
 	input := styleBox.Width(max(10, w-2)).Render(m.ta.View())
 	return lipgloss.JoinVertical(lipgloss.Left, header, body, input, help)

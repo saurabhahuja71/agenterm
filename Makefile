@@ -1,4 +1,4 @@
-VERSION ?= 0.1.2
+VERSION ?= 0.1.3
 BINARY  := agenterm
 MODULE  := ./cmd/agenterm
 LDFLAGS := -s -w -X main.version=$(VERSION)

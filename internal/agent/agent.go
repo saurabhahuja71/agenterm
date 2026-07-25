@@ -105,6 +105,11 @@ func (a *Agent) RunUserMessage(ctx context.Context, user string, emit func(Event
 	}
 
 	for round := 0; round < a.MaxToolRounds; round++ {
+		if err := ctx.Err(); err != nil {
+			emit(Event{Kind: EventError, Text: "cancelled"})
+			emit(Event{Kind: EventDone})
+			return err
+		}
 		req := llm.ChatRequest{
 			Model:       a.Cfg.Model,
 			Messages:    a.History,
@@ -119,10 +124,16 @@ func (a *Agent) RunUserMessage(ctx context.Context, user string, emit func(Event
 			req.Tools = toolSchemas
 		}
 
+		emit(Event{Kind: EventStatus, Text: fmt.Sprintf("calling %s (round %d)…", a.Cfg.Model, round+1)})
 		handler := &streamBridge{emit: emit}
 		msg, err := a.Client.ChatStream(ctx, req, handler)
 		if err != nil {
-			emit(Event{Kind: EventError, Text: err.Error()})
+			if ctx.Err() != nil {
+				emit(Event{Kind: EventError, Text: "cancelled"})
+			} else {
+				emit(Event{Kind: EventError, Text: err.Error()})
+			}
+			emit(Event{Kind: EventDone})
 			return err
 		}
 
@@ -139,6 +150,10 @@ func (a *Agent) RunUserMessage(ctx context.Context, user string, emit func(Event
 		a.History = append(a.History, msg)
 
 		if len(msg.ToolCalls) == 0 {
+			// Some models return only whitespace after a long load — surface it.
+			if strings.TrimSpace(msg.Content) == "" {
+				emit(Event{Kind: EventToken, Text: "(empty reply — model may still be loading; try again or /model list)"})
+			}
 			emit(Event{Kind: EventDone})
 			return nil
 		}
@@ -179,6 +194,12 @@ func (s *streamBridge) OnToolCallDelta(index int, tc llm.ToolCall) {
 	// optional: show streaming tool assembly
 	_ = index
 	_ = tc
+}
+
+func (s *streamBridge) OnStatus(text string) {
+	if text != "" {
+		s.emit(Event{Kind: EventStatus, Text: text})
+	}
 }
 
 // isTrivialChat is true for short greetings / small-talk that should not

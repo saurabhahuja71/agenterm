@@ -106,6 +106,22 @@ type streamChunk struct {
 type StreamHandler interface {
 	OnToken(token string)
 	OnToolCallDelta(index int, tc ToolCall)
+	// OnStatus is optional progress (model load, first byte, …). May be no-op.
+	OnStatus(text string)
+}
+
+// statusEmitter is implemented by handlers that want progress callbacks.
+type statusEmitter interface {
+	OnStatus(text string)
+}
+
+func emitStatus(h StreamHandler, text string) {
+	if h == nil {
+		return
+	}
+	if s, ok := h.(statusEmitter); ok {
+		s.OnStatus(text)
+	}
 }
 
 // ChatStream streams a completion; returns the assembled assistant message.
@@ -124,6 +140,7 @@ func (c *Client) ChatStream(ctx context.Context, req ChatRequest, h StreamHandle
 		httpReq.Header.Set("Authorization", "Bearer "+c.APIKey)
 	}
 
+	emitStatus(h, "connecting to "+c.BaseURL+" …")
 	resp, err := c.HTTPClient.Do(httpReq)
 	if err != nil {
 		return Message{}, fmt.Errorf("chat request failed: %w", err)
@@ -134,6 +151,7 @@ func (c *Client) ChatStream(ctx context.Context, req ChatRequest, h StreamHandle
 		b, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
 		return Message{}, fmt.Errorf("API %s: %s", resp.Status, strings.TrimSpace(string(b)))
 	}
+	emitStatus(h, "streaming "+req.Model+" (first token can wait while Ollama loads the model)…")
 
 	// Non-SSE JSON fallback (some servers ignore stream)
 	ct := resp.Header.Get("Content-Type")
@@ -158,6 +176,7 @@ func (c *Client) ChatStream(ctx context.Context, req ChatRequest, h StreamHandle
 	msg := Message{Role: RoleAssistant}
 	// Accumulate tool call fragments by index
 	toolAcc := map[int]*ToolCall{}
+	gotToken := false
 
 	sc := bufio.NewScanner(resp.Body)
 	// Increase buffer for large tool payloads
@@ -165,6 +184,9 @@ func (c *Client) ChatStream(ctx context.Context, req ChatRequest, h StreamHandle
 	sc.Buffer(buf, 1024*1024)
 
 	for sc.Scan() {
+		if err := ctx.Err(); err != nil {
+			return msg, err
+		}
 		line := sc.Text()
 		if line == "" {
 			continue
@@ -188,6 +210,10 @@ func (c *Client) ChatStream(ctx context.Context, req ChatRequest, h StreamHandle
 		}
 		delta := chunk.Choices[0].Delta
 		if delta.Content != "" {
+			if !gotToken {
+				gotToken = true
+				emitStatus(h, "receiving tokens…")
+			}
 			msg.Content += delta.Content
 			if h != nil {
 				h.OnToken(delta.Content)
