@@ -249,6 +249,8 @@ You will not match **hosted Grok** by only polishing the TUI.
 | Quiet TUI | Compact tools; `/verbose` for full dumps |
 | Post-tool brief answers | Cap tool payload, cooler/shorter synthesis, less invented listings |
 | Smoke scripts | `scripts/smoke_agent.go`, `scripts/smoke_sidb.go` |
+| Default model | `qwen2.5-coder:32b` for Go + docs |
+| First-launch OSC junk | Fixed dark glamour (no `WithAutoStyle` color probe); scrub `]11;rgb:…` from input |
 
 ---
 

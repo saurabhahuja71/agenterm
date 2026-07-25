@@ -3,6 +3,8 @@ package tui
 import (
 	"context"
 	"fmt"
+	"os"
+	"regexp"
 	"strings"
 	"time"
 
@@ -12,6 +14,14 @@ import (
 	"github.com/charmbracelet/glamour"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/saurabhahuja71/agenterm/internal/agent"
+)
+
+// OSC / color-query replies that leak into stdin when libraries probe the TTY
+// (classic first-launch garbage: "]11;rgb:fafa/fafa/fdfd\").
+var reOSCLeak = regexp.MustCompile(
+	`(?:\x1b)?\]\d+;[^\x07\x1b\\]*(?:\x07|\x1b\\)?` +
+		`|\]\d+;rgb:[0-9a-fA-F/\\]+` +
+		`|rgb:[0-9a-fA-F]{2,4}/[0-9a-fA-F]{2,4}/[0-9a-fA-F]{2,4}\\?`,
 )
 
 var (
@@ -65,6 +75,8 @@ type model struct {
 	waitSecs  int
 	// verbose shows full tool I/O and model preambles; default is quiet/compact.
 	verbose bool
+	// scrubLeft: remaining startup OSC scrub passes (color-query junk).
+	scrubLeft int
 }
 
 type streamEvMsg agent.Event
@@ -86,10 +98,9 @@ func New(deps Deps) model {
 
 	vp := viewport.New(80, 20)
 
-	r, _ := glamour.NewTermRenderer(
-		glamour.WithAutoStyle(),
-		glamour.WithWordWrap(80),
-	)
+	// Fixed dark style — WithAutoStyle() queries OSC 11 (bg color) and the
+	// reply often appears as garbage in the input line on first launch.
+	r := newGlamourRenderer(80)
 
 	m := model{
 		deps:     deps,
@@ -98,7 +109,8 @@ func New(deps Deps) model {
 		status:   "ready",
 		stream:   &strings.Builder{},
 		renderer: r,
-		verbose: false, // compact tools by default
+		verbose:   false, // compact tools by default
+		scrubLeft: 5,     // a few startup passes to catch late OSC replies
 		lines: []chatLine{
 			{role: "system", text: "agenterm — snappy terminal agent (Ollama / OpenAI-compatible + MCP)"},
 			{role: "system", text: "Endpoint: " + deps.Summary},
@@ -117,7 +129,56 @@ func (m *model) ensureStream() *strings.Builder {
 }
 
 func (m model) Init() tea.Cmd {
-	return textarea.Blink
+	// Scrub any OSC color-query junk already sitting in the input buffer.
+	return tea.Batch(textarea.Blink, scrubInputCmd())
+}
+
+type scrubInputMsg struct{}
+
+func scrubInputCmd() tea.Cmd {
+	return func() tea.Msg { return scrubInputMsg{} }
+}
+
+func newGlamourRenderer(width int) *glamour.TermRenderer {
+	if width < 20 {
+		width = 80
+	}
+	// Prefer explicit dark theme over AutoStyle (no TTY color probes).
+	r, err := glamour.NewTermRenderer(
+		glamour.WithStandardStyle("dark"),
+		glamour.WithWordWrap(width),
+	)
+	if err != nil {
+		r, _ = glamour.NewTermRenderer(glamour.WithWordWrap(width))
+	}
+	return r
+}
+
+// scrubTerminalGarbage removes leaked OSC / rgb color-query fragments.
+func scrubTerminalGarbage(s string) string {
+	if s == "" {
+		return s
+	}
+	out := reOSCLeak.ReplaceAllString(s, "")
+	// Common partials if ESC was consumed already
+	out = strings.ReplaceAll(out, "]11;", "")
+	out = strings.ReplaceAll(out, "]10;", "")
+	// ST is often a bare trailing backslash after rgb:... was stripped
+	out = strings.Trim(out, " \t\r\n\\")
+	// If almost nothing left but punctuation from probes, drop it
+	if out != "" && !hasLetterOrDigit(out) && (strings.Contains(s, "rgb:") || strings.Contains(s, "]11") || strings.Contains(s, "]10")) {
+		return ""
+	}
+	return strings.TrimSpace(out)
+}
+
+func hasLetterOrDigit(s string) bool {
+	for _, r := range s {
+		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') {
+			return true
+		}
+	}
+	return false
 }
 
 func busyTick() tea.Cmd {
@@ -130,6 +191,21 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	var cmds []tea.Cmd
 
 	switch msg := msg.(type) {
+	case scrubInputMsg:
+		if v := m.ta.Value(); v != "" {
+			if cleaned := scrubTerminalGarbage(v); cleaned != v {
+				m.ta.SetValue(cleaned)
+				m.ta.CursorEnd()
+			}
+		}
+		// Limited startup retries — OSC replies can arrive a few frames late.
+		if m.scrubLeft > 0 {
+			m.scrubLeft--
+			return m, tea.Tick(100*time.Millisecond, func(time.Time) tea.Msg {
+				return scrubInputMsg{}
+			})
+		}
+
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
 		m.height = msg.Height
@@ -142,13 +218,15 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.vp.Width = max(20, msg.Width-2)
 		m.vp.Height = vpH
 		m.ta.SetWidth(max(20, msg.Width-4))
-		if m.renderer != nil {
-			m.renderer, _ = glamour.NewTermRenderer(
-				glamour.WithAutoStyle(),
-				glamour.WithWordWrap(max(40, msg.Width-8)),
-			)
-		}
+		m.renderer = newGlamourRenderer(max(40, msg.Width-8))
 		m.refreshViewport()
+		// Resize often coincides with first paint; scrub leaked OSC once more.
+		if v := m.ta.Value(); v != "" {
+			if cleaned := scrubTerminalGarbage(v); cleaned != v {
+				m.ta.SetValue(cleaned)
+				m.ta.CursorEnd()
+			}
+		}
 
 	case tea.KeyMsg:
 		switch msg.String() {
@@ -283,6 +361,13 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		var cmd tea.Cmd
 		m.ta, cmd = m.ta.Update(msg)
 		cmds = append(cmds, cmd)
+		// Drop OSC junk if it landed as "typed" characters.
+		if v := m.ta.Value(); v != "" && (strings.Contains(v, "]11;") || strings.Contains(v, "rgb:") || strings.Contains(v, "\x1b]")) {
+			if cleaned := scrubTerminalGarbage(v); cleaned != v {
+				m.ta.SetValue(cleaned)
+				m.ta.CursorEnd()
+			}
+		}
 	}
 	var cmd tea.Cmd
 	m.vp, cmd = m.vp.Update(msg)
@@ -737,6 +822,11 @@ func max(a, b int) int {
 
 // Run launches the full-screen TUI.
 func Run(deps Deps) error {
+	// Discourage libraries from probing terminal fg/bg via OSC (leaks into stdin).
+	// Fixed styles above are the main fix; these env hints help termenv/glamour.
+	if os.Getenv("GLAMOUR_STYLE") == "" {
+		_ = os.Setenv("GLAMOUR_STYLE", "dark")
+	}
 	p := tea.NewProgram(New(deps), tea.WithAltScreen())
 	_, err := p.Run()
 	return err
