@@ -63,6 +63,8 @@ type model struct {
 	busySince time.Time
 	gotToken  bool
 	waitSecs  int
+	// verbose shows full tool I/O and model preambles; default is quiet/compact.
+	verbose bool
 }
 
 type streamEvMsg agent.Event
@@ -71,7 +73,7 @@ type busyTickMsg time.Time
 
 func New(deps Deps) model {
 	ta := textarea.New()
-	ta.Placeholder = "Message…  /help  /model  /tools off"
+	ta.Placeholder = "Message…  /help  /model  /quiet  /verbose"
 	ta.Focus()
 	ta.Prompt = "❯ "
 	ta.CharLimit = 0
@@ -96,10 +98,11 @@ func New(deps Deps) model {
 		status:   "ready",
 		stream:   &strings.Builder{},
 		renderer: r,
+		verbose: false, // compact tools by default
 		lines: []chatLine{
 			{role: "system", text: "agenterm — snappy terminal agent (Ollama / OpenAI-compatible + MCP)"},
 			{role: "system", text: "Endpoint: " + deps.Summary},
-			{role: "system", text: "Enter send · Esc cancel · Ctrl+C quit · /help · /model · /tools"},
+			{role: "system", text: "Quiet mode on · /verbose for full tool output · /help"},
 		},
 	}
 	m.refreshViewport()
@@ -200,26 +203,39 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		switch ev.Kind {
 		case agent.EventToken:
 			m.gotToken = true
+			// Quiet mode: buffer tokens but don't paint pure tool-JSON noise live.
 			m.ensureStream().WriteString(ev.Text)
-			m.upsertStreamingAssistant(m.stream.String())
+			cur := m.stream.String()
+			if m.verbose || !isMostlyToolNoise(cur) {
+				m.upsertStreamingAssistant(cur)
+			} else {
+				// Keep status only; drop any partial tool-JSON bubble.
+				m.dropStreamingAssistant()
+			}
 			m.status = "streaming…"
 			m.refreshViewport()
 		case agent.EventToolStart:
 			m.gotToken = true
-			m.flushStreamAsLine()
+			if m.verbose {
+				m.flushStreamAsLine()
+			} else {
+				// Hide "Let's read…" preambles and raw {"name":"read_file"...} dumps.
+				m.dropStreamIfNoise()
+			}
 			m.lines = append(m.lines, chatLine{
 				role: "tool",
-				text: fmt.Sprintf("→ %s(%s)", ev.Tool, truncate(ev.Text, 120)),
+				text: formatToolStart(ev.Tool, ev.Text, m.verbose),
 			})
 			m.status = "tool: " + ev.Tool
 			m.refreshViewport()
 		case agent.EventToolEnd:
 			m.lines = append(m.lines, chatLine{
 				role: "tool",
-				text: fmt.Sprintf("← %s\n%s", ev.Tool, truncate(ev.ToolOut, 900)),
+				text: formatToolEnd(ev.Tool, ev.ToolOut, m.verbose),
 			})
 			m.refreshViewport()
 		case agent.EventStatus:
+			// Status bar only — do not spam the chat transcript.
 			if ev.Text != "" {
 				m.status = ev.Text
 			}
@@ -230,7 +246,12 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.status = "error"
 			m.refreshViewport()
 		case agent.EventDone:
-			m.flushStreamAsLine()
+			// Final answer: show stream unless it's leftover tool JSON.
+			if m.verbose {
+				m.flushStreamAsLine()
+			} else {
+				m.flushStreamAsLineQuiet()
+			}
 			m.busy = false
 			m.gotToken = false
 			m.waitSecs = 0
@@ -244,7 +265,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 	case streamClosedMsg:
-		m.flushStreamAsLine()
+		if m.verbose {
+			m.flushStreamAsLine()
+		} else {
+			m.flushStreamAsLineQuiet()
+		}
 		m.busy = false
 		m.gotToken = false
 		m.waitSecs = 0
@@ -313,7 +338,7 @@ func (m model) handleSlash(text string) (model, tea.Cmd) {
 	parts := strings.Fields(text)
 	cmd := strings.ToLower(parts[0])
 	switch cmd {
-	case "/quit", "/exit", "/q":
+	case "/quit", "/exit":
 		return m, tea.Quit
 	case "/help", "/h":
 		m.lines = append(m.lines, chatLine{role: "system", text: helpText()})
@@ -343,6 +368,12 @@ func (m model) handleSlash(text string) (model, tea.Cmd) {
 				m.lines = append(m.lines, chatLine{role: "error", text: "usage: /tools on | /tools off"})
 			}
 		}
+	case "/verbose", "/v":
+		m.verbose = true
+		m.lines = append(m.lines, chatLine{role: "system", text: "verbose on — full tool args/output and model preambles"})
+	case "/quiet":
+		m.verbose = false
+		m.lines = append(m.lines, chatLine{role: "system", text: "quiet mode — compact tools (default). /verbose for full traces"})
 	default:
 		m.lines = append(m.lines, chatLine{role: "error", text: "unknown command " + cmd + " — try /help"})
 	}
@@ -360,13 +391,14 @@ Commands:
   /model <name>      Switch model for this chat (immediate, like Grok)
   /models            Same as /model
   /tools on|off      Toggle function tools (session; off = faster chat)
-  /quit              Hint to exit (Ctrl+C)
+  /quiet             Compact UI (default): short tool lines, hide tool JSON dumps
+  /verbose           Full tool args/output and model “let me read…” text
+  /quit              Exit (or Ctrl+C when idle)
 
 Examples:
-  /model
   /model qwen2.5-coder:32b
-  /model qwen3.6-plus:latest
   /tools off
+  /quiet
 
 Keys:
   Enter           Send
@@ -481,6 +513,132 @@ func (m *model) flushStreamAsLine() {
 	m.lines = append(m.lines, chatLine{role: "assistant", text: content})
 }
 
+// flushStreamAsLineQuiet drops tool-JSON / empty stream; keeps real answers.
+func (m *model) flushStreamAsLineQuiet() {
+	sb := m.ensureStream()
+	content := strings.TrimSpace(sb.String())
+	sb.Reset()
+	m.dropStreamingAssistant()
+	if content == "" || isMostlyToolNoise(content) {
+		return
+	}
+	m.lines = append(m.lines, chatLine{role: "assistant", text: content})
+}
+
+func (m *model) dropStreamingAssistant() {
+	if len(m.lines) > 0 && m.lines[len(m.lines)-1].role == "assistant-stream" {
+		m.lines = m.lines[:len(m.lines)-1]
+	}
+}
+
+func (m *model) dropStreamIfNoise() {
+	sb := m.ensureStream()
+	content := strings.TrimSpace(sb.String())
+	sb.Reset()
+	m.dropStreamingAssistant()
+	// Keep non-noise preamble only in verbose (caller already branched).
+	_ = content
+}
+
+// isMostlyToolNoise detects model dumps of tool-call JSON and short “let me tool” chatter.
+func isMostlyToolNoise(s string) bool {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return true
+	}
+	// Raw / fenced tool JSON
+	if strings.Contains(s, `"name"`) && (strings.Contains(s, `"arguments"`) || strings.Contains(s, `"parameters"`)) {
+		// If almost the whole message is JSON-ish, hide it.
+		withoutSpace := strings.Map(func(r rune) rune {
+			if r == ' ' || r == '\n' || r == '\t' {
+				return -1
+			}
+			return r
+		}, s)
+		if strings.HasPrefix(withoutSpace, "{") || strings.Contains(s, "```") {
+			return true
+		}
+		// JSON object is majority of text
+		if i := strings.Index(s, "{"); i >= 0 {
+			jsonPart := s[i:]
+			if len(jsonPart) > len(s)*2/3 {
+				return true
+			}
+		}
+	}
+	low := strings.ToLower(s)
+	if len(s) < 400 {
+		for _, p := range []string{
+			"let's read", "lets read", "i'll read", "i will read",
+			"let me read", "reading the", "i'll use", "i will use",
+			"using the read_file", "call read_file", "invoke",
+		} {
+			if strings.Contains(low, p) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func formatToolStart(name, args string, verbose bool) string {
+	if verbose {
+		return fmt.Sprintf("→ %s(%s)", name, truncate(args, 200))
+	}
+	path := toolArgHint(args)
+	if path != "" {
+		return fmt.Sprintf("→ %s · %s", name, truncate(path, 72))
+	}
+	return fmt.Sprintf("→ %s", name)
+}
+
+func formatToolEnd(name, out string, verbose bool) string {
+	if strings.HasPrefix(out, "error:") {
+		return fmt.Sprintf("← %s · %s", name, truncate(out, 160))
+	}
+	if verbose {
+		return fmt.Sprintf("← %s\n%s", name, truncate(out, 900))
+	}
+	n := len(out)
+	unit := "B"
+	sz := float64(n)
+	if n >= 1024 {
+		sz = float64(n) / 1024
+		unit = "KB"
+	}
+	// One-line confirmation; model will summarize in the final answer.
+	return fmt.Sprintf("← %s · ok (%.1f %s)", name, sz, unit)
+}
+
+func toolArgHint(argsJSON string) string {
+	argsJSON = strings.TrimSpace(argsJSON)
+	if argsJSON == "" {
+		return ""
+	}
+	// Prefer "path" then "name" then "command"
+	for _, key := range []string{"path", "name", "root", "command"} {
+		// cheap extract: "path": "..."
+		needle := `"` + key + `"`
+		i := strings.Index(argsJSON, needle)
+		if i < 0 {
+			continue
+		}
+		rest := argsJSON[i+len(needle):]
+		// skip : and spaces
+		rest = strings.TrimLeft(rest, " \t\n:")
+		if len(rest) == 0 || rest[0] != '"' {
+			continue
+		}
+		rest = rest[1:]
+		j := strings.Index(rest, `"`)
+		if j < 0 {
+			continue
+		}
+		return rest[:j]
+	}
+	return truncate(argsJSON, 48)
+}
+
 func (m *model) refreshViewport() {
 	var b strings.Builder
 	width := m.vp.Width
@@ -530,7 +688,11 @@ func (m model) View() string {
 	} else {
 		header += styleStatus.Render("  ·  " + m.status)
 	}
-	help := styleHelp.Render("enter send · esc cancel · ctrl+c quit · /help · /model · ctrl+l clear")
+	mode := "quiet"
+	if m.verbose {
+		mode = "verbose"
+	}
+	help := styleHelp.Render("enter send · esc cancel · /" + mode + " · /help · /model · ctrl+l clear")
 	body := styleBox.Width(max(10, w-2)).Render(m.vp.View())
 	input := styleBox.Width(max(10, w-2)).Render(m.ta.View())
 	return lipgloss.JoinVertical(lipgloss.Left, header, body, input, help)
