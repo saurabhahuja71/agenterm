@@ -4,12 +4,6 @@ on:
   push:
     tags:
       - "v*"
-  workflow_dispatch:
-    inputs:
-      tag:
-        description: "Tag to release (e.g. v0.1.0) — must already exist or will be created from this ref"
-        required: false
-        default: ""
 
 permissions:
   contents: write
@@ -19,29 +13,10 @@ env:
   GO_VERSION: "1.25.x"
 
 jobs:
-  binaries:
-    name: Build binaries
+  # Single job: cross-compile all platforms + create GitHub Release (avoids artifact handoff issues)
+  release:
+    name: Build & GitHub Release
     runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - goos: linux
-            goarch: amd64
-            ext: ""
-          - goos: linux
-            goarch: arm64
-            ext: ""
-          - goos: darwin
-            goarch: amd64
-            ext: ""
-          - goos: darwin
-            goarch: arm64
-            ext: ""
-          - goos: windows
-            goarch: amd64
-            ext: ".exe"
-
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -55,78 +30,56 @@ jobs:
         id: ver
         run: |
           TAG="${GITHUB_REF_NAME}"
-          if [[ "${{ github.event_name }}" == "workflow_dispatch" && -n "${{ inputs.tag }}" ]]; then
-            TAG="${{ inputs.tag }}"
-          fi
           VERSION="${TAG#v}"
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
 
-      - name: Build
-        env:
-          GOOS: ${{ matrix.goos }}
-          GOARCH: ${{ matrix.goarch }}
-          CGO_ENABLED: "0"
+      - name: Cross-compile binaries
         run: |
+          set -euo pipefail
           VERSION="${{ steps.ver.outputs.version }}"
-          OUT="agenterm-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.ext }}"
-          go build -trimpath \
-            -ldflags="-s -w -X main.version=${VERSION}" \
-            -o "dist/${OUT}" \
-            ./cmd/agenterm
-          cd dist && sha256sum "${OUT}" > "${OUT}.sha256"
-
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: agenterm-${{ matrix.goos }}-${{ matrix.goarch }}
-          path: |
-            dist/agenterm-${{ matrix.goos }}-${{ matrix.goarch }}*
-          if-no-files-found: error
-
-  release:
-    name: GitHub Release
-    needs: binaries
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Download all artifacts
-        uses: actions/download-artifact@v4
-        with:
-          path: artifacts
-          merge-multiple: true
-
-      - name: Collect assets
-        run: |
           mkdir -p dist
-          find artifacts -type f -exec cp -v {} dist/ \;
+          build() {
+            local goos=$1 goarch=$2
+            local ext=""
+            [[ "$goos" == windows ]] && ext=".exe"
+            local out="dist/agenterm-${goos}-${goarch}${ext}"
+            echo "→ $out"
+            CGO_ENABLED=0 GOOS="$goos" GOARCH="$goarch" \
+              go build -trimpath \
+                -ldflags="-s -w -X main.version=${VERSION}" \
+                -o "$out" ./cmd/agenterm
+            (cd dist && sha256sum "$(basename "$out")" > "$(basename "$out").sha256")
+          }
+          build linux amd64
+          build linux arm64
+          build darwin amd64
+          build darwin arm64
+          build windows amd64
           ls -la dist/
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ github.ref_name }}
-          name: agenterm ${{ github.ref_name }}
+          tag_name: ${{ steps.ver.outputs.tag }}
+          name: agenterm ${{ steps.ver.outputs.tag }}
           draft: false
           prerelease: false
           generate_release_notes: true
           body: |
-            ## agenterm ${{ github.ref_name }}
+            ## agenterm ${{ steps.ver.outputs.tag }}
 
             Terminal AI agent — **native binaries** + **container**.
 
-            ### Native (no container limits)
+            ### Native (recommended — no container limits)
 
             ```bash
-            # Linux amd64 example
-            curl -fsSL -o agenterm \
-              https://github.com/saurabhahuja71/agenterm/releases/download/${{ github.ref_name }}/agenterm-linux-amd64
-            chmod +x agenterm
-            ./agenterm --ping
-            ./agenterm
+            curl -fsSL https://raw.githubusercontent.com/saurabhahuja71/agenterm/main/scripts/install.sh | bash
+            agenterm --version
+            agenterm
             ```
+
+            Or download a specific asset from this release, e.g. `agenterm-linux-amd64`.
 
             ### Container (Podman / Docker)
 
@@ -134,13 +87,21 @@ jobs:
             podman run --rm -it --network=host \
               -e AGENTERM_BASE_URL=http://127.0.0.1:11434/v1 \
               -v "$HOME/.agenterm:/home/agenterm/.agenterm:Z" \
-              ghcr.io/saurabhahuja71/agenterm:${{ github.ref_name }}
+              ghcr.io/saurabhahuja71/agenterm:${{ steps.ver.outputs.tag }}
             ```
 
-            Or build from source: see README.
-
-            **Requires:** Ollama or any OpenAI-compatible API.
-          files: dist/*
+            Point `AGENTERM_BASE_URL` at local or remote Ollama (`…:11434/v1`).
+          files: |
+            dist/agenterm-linux-amd64
+            dist/agenterm-linux-amd64.sha256
+            dist/agenterm-linux-arm64
+            dist/agenterm-linux-arm64.sha256
+            dist/agenterm-darwin-amd64
+            dist/agenterm-darwin-amd64.sha256
+            dist/agenterm-darwin-arm64
+            dist/agenterm-darwin-arm64.sha256
+            dist/agenterm-windows-amd64.exe
+            dist/agenterm-windows-amd64.exe.sha256
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
