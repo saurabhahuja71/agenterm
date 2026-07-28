@@ -1,6 +1,10 @@
-# agenterm
+# agenterm — Terminal AI Agent Tutorial (Ollama, OpenAI, xAI + MCP Client)
 
-**Terminal AI agent** for [Ollama](https://ollama.com), [xAI](https://x.ai), [OpenAI](https://openai.com), and any **OpenAI-compatible** API. Chat in a full-screen **TUI**, use **file tools** when you need them, and plug in **[MCP](https://modelcontextprotocol.io)** servers—all from one static Go binary.
+**Terminal AI agent** and **coding assistant in the terminal** for [Ollama](https://ollama.com), [xAI](https://x.ai), [OpenAI](https://openai.com), and any **OpenAI-compatible** API. Full-screen **TUI**, optional **file/shell tools**, and **[Model Context Protocol (MCP)](https://modelcontextprotocol.io)** client support—one static **Go** binary.
+
+> **Lab 1** in the [AI · Agents · MCP learning path](https://github.com/saurabhahuja71/learning-path#7-ai--agents--mcp) · Audience: intermediate · Time: ~1 hour to first chat · Level: intermediate
+
+**SEO keywords:** *terminal AI agent*, *Ollama TUI*, *OpenAI compatible CLI agent*, *MCP client Go*, *local LLM coding agent*, *agenterm tutorial*, *AI pair programmer terminal*.
 
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Go](https://img.shields.io/badge/Go-1.22+-00ADD8?logo=go)](https://go.dev/)
@@ -406,6 +410,24 @@ make dist VERSION=0.2.1   # local cross-build
 ```
 
 ---
+
+
+
+## Learning path — AI / Agents / MCP
+
+| # | Lab | Focus |
+|---|-----|--------|
+| 0 | [mcp-demo](https://github.com/saurabhahuja71/mcp-demo) | Build MCP server tools |
+| **1 (this)** | agenterm | Terminal agent + MCP client |
+| 2 | [agentic-ai-sample](https://github.com/saurabhahuja71/agentic-ai-sample) | LangChain ReAct research agent |
+| 3 | [workshop-redis-ai](https://github.com/saurabhahuja71/workshop-redis-ai) | Redis vector search + RAG workshop |
+
+Hub: [learning-path](https://github.com/saurabhahuja71/learning-path)
+
+## Topics / SEO tags
+
+`ai-agent` `ollama` `mcp` `golang` `tui` `openai` `xai` `terminal` `llm` `coding-agent` `tutorial` `education`
+
 
 ## License
 
