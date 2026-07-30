@@ -74,6 +74,36 @@ type FunctionCall struct {
 	Arguments string `json:"arguments"`
 }
 
+// UnmarshalJSON accepts arguments as a JSON string or object/array.
+// SGLang/Ollama usually send a string; some servers emit a nested object,
+// which would otherwise fail the whole tool_call and drop str_replace.
+func (f *FunctionCall) UnmarshalJSON(data []byte) error {
+	var raw struct {
+		Name      string          `json:"name"`
+		Arguments json.RawMessage `json:"arguments"`
+	}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+	f.Name = raw.Name
+	if len(raw.Arguments) == 0 || string(raw.Arguments) == "null" {
+		f.Arguments = ""
+		return nil
+	}
+	// Already a JSON string value
+	if raw.Arguments[0] == '"' {
+		var s string
+		if err := json.Unmarshal(raw.Arguments, &s); err != nil {
+			return err
+		}
+		f.Arguments = s
+		return nil
+	}
+	// Object or array → keep as compact JSON text for tool runners
+	f.Arguments = string(raw.Arguments)
+	return nil
+}
+
 type Tool struct {
 	Type     string             `json:"type"` // "function"
 	Function ToolFunctionSchema `json:"function"`
@@ -114,7 +144,10 @@ type streamChunk struct {
 			ToolCalls []ToolCall `json:"tool_calls"`
 			Role      string     `json:"role"`
 		} `json:"delta"`
-		FinishReason *string `json:"finish_reason"`
+		// Message is non-stream shape. Some proxies (e.g. sglang-toolcall-proxy
+		// before delta rewrite) emit a full completion as one SSE frame.
+		Message      *Message `json:"message,omitempty"`
+		FinishReason *string  `json:"finish_reason"`
 	} `json:"choices"`
 	Error *struct {
 		Message string `json:"message"`
@@ -227,7 +260,52 @@ func (c *Client) ChatStream(ctx context.Context, req ChatRequest, h StreamHandle
 		if len(chunk.Choices) == 0 {
 			continue
 		}
-		delta := chunk.Choices[0].Delta
+		ch0 := chunk.Choices[0]
+		delta := ch0.Delta
+		// Full message stuffed into SSE (proxy bug / non-stream JSON over event-stream).
+		if ch0.Message != nil && delta.Content == "" && len(delta.ToolCalls) == 0 {
+			m := ch0.Message
+			if m.Content != "" {
+				if !gotToken {
+					gotToken = true
+					emitStatus(h, "receiving tokens…")
+				}
+				msg.Content += m.Content
+				if h != nil {
+					h.OnToken(m.Content)
+				}
+			}
+			for i, tc := range m.ToolCalls {
+				idx := i
+				var raw map[string]any
+				b, _ := json.Marshal(tc)
+				_ = json.Unmarshal(b, &raw)
+				if v, ok := raw["index"].(float64); ok {
+					idx = int(v)
+				}
+				acc, ok := toolAcc[idx]
+				if !ok {
+					acc = &ToolCall{Type: "function"}
+					toolAcc[idx] = acc
+				}
+				if tc.ID != "" {
+					acc.ID = tc.ID
+				}
+				if tc.Type != "" {
+					acc.Type = tc.Type
+				}
+				if tc.Function.Name != "" {
+					acc.Function.Name = tc.Function.Name
+				}
+				if tc.Function.Arguments != "" {
+					acc.Function.Arguments = tc.Function.Arguments
+				}
+				if h != nil {
+					h.OnToolCallDelta(idx, *acc)
+				}
+			}
+			continue
+		}
 		if delta.Content != "" {
 			if !gotToken {
 				gotToken = true
