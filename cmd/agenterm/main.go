@@ -32,15 +32,15 @@ var (
 func main() {
 	root := &cobra.Command{
 		Use:     "agenterm",
-		Short:   "Snappy terminal AI agent (Ollama / OpenAI-compatible + MCP)",
-		Long:    "agenterm is a Grok-style terminal chat agent. Point it at local or remote Ollama, xAI, OpenAI, or any OpenAI-compatible server.",
+		Short:   "Snappy terminal AI agent (Ollama / SGLang / OpenAI-compatible + MCP)",
+		Long:    "agenterm is a Grok-style terminal chat agent. Point it at local or remote Ollama, SGLang, xAI, OpenAI, or any OpenAI-compatible server.",
 		Version: version,
 		RunE:    runTUI,
 	}
-	root.Flags().StringVar(&flagProvider, "provider", "", "provider preset: ollama-local | ollama-remote | xai | openai | custom")
-	root.Flags().StringVarP(&flagModel, "model", "m", "", "model id (e.g. qwen2.5-coder:32b, qwen3-coder:30b, grok-3)")
-	root.Flags().StringVar(&flagBaseURL, "base-url", "", "OpenAI-compatible API base (e.g. http://127.0.0.1:11434/v1)")
-	root.Flags().StringVar(&flagAPIKey, "api-key", "", "API key (optional for Ollama)")
+	root.Flags().StringVar(&flagProvider, "provider", "", "provider preset: ollama-local | ollama-remote | sglang | xai | openai | custom")
+	root.Flags().StringVarP(&flagModel, "model", "m", "", "model id (e.g. qwen2.5-coder:32b, qwen2.5-coder-32b-q4_k_m.gguf, grok-3)")
+	root.Flags().StringVar(&flagBaseURL, "base-url", "", "OpenAI-compatible API base (e.g. http://127.0.0.1:11434/v1 or http://127.0.0.1:30000/v1)")
+	root.Flags().StringVar(&flagAPIKey, "api-key", "", "API key (optional for Ollama/SGLang)")
 	root.Flags().StringVar(&flagConfig, "config", "", "path to config.toml (default ~/.agenterm/config.toml)")
 	root.Flags().BoolVar(&flagNoMCP, "no-mcp", false, "do not connect MCP servers from config")
 	root.Flags().BoolVar(&flagNoTools, "no-tools", false, "disable function/tool calling for this session (faster chat)")
@@ -72,6 +72,7 @@ func main() {
 			fmt.Println("wrote", path)
 			fmt.Println("tips:")
 			fmt.Println("  • Ollama default: http://127.0.0.1:11434/v1 (SSH tunnel OK)")
+			fmt.Println("  • SGLang:        agenterm --provider sglang  (http://127.0.0.1:30000/v1)")
 			fmt.Println("  • Fast chat:     agenterm --no-tools")
 			fmt.Println("  • Ping:          agenterm --ping")
 			return nil

@@ -1,21 +1,24 @@
 # Copy to ~/.agenterm/config.toml  (or: agenterm init)
 
-# Named preset: ollama-local | ollama-remote | xai | openai | custom
+# Named preset: ollama-local | ollama-remote | sglang | xai | openai | custom
 provider = "ollama-local"
 
-# Chat model (Ollama tag or cloud model id)
+# Chat model (Ollama tag, SGLang served-model-name, or cloud model id)
 # Default for Go + documentation agent work: qwen2.5-coder:32b
-# (see docs/grok-parity-roadmap.md). Alternate: qwen3-coder:30b
+# (see docs/grok-parity-roadmap.md). Alternate Ollama: qwen3-coder:30b
+# SGLang (GGUF basename / --served-model-name): qwen2.5-coder-32b-q4_k_m.gguf
 model = "qwen2.5-coder:32b"
 
-# OpenAI-compatible root. For Ollama always include /v1
-# Local / SSH tunnel:
+# OpenAI-compatible root. Always include /v1
+# Local Ollama / SSH tunnel:
 #   base_url = "http://127.0.0.1:11434/v1"
 # Remote Ollama on another Linux box:
 #   base_url = "http://192.168.1.50:11434/v1"
+# SGLang (local or SSH tunnel to :30000):
+#   base_url = "http://127.0.0.1:30000/v1"
 base_url = "http://127.0.0.1:11434/v1"
 
-# Ollama accepts any key; cloud providers need a real secret.
+# Ollama/SGLang accept any key; cloud providers need a real secret.
 # Prefer env: AGENTERM_API_KEY, OLLAMA_API_KEY, XAI_API_KEY, OPENAI_API_KEY
 api_key = "ollama"
 
@@ -53,6 +56,14 @@ model = "qwen2.5-coder:32b"
 base_url = "http://127.0.0.1:11434/v1"
 api_key = "ollama"
 model = "qwen2.5-coder:32b"
+
+[providers.sglang]
+# SGLang OpenAI-compatible server (default listen 127.0.0.1:30000).
+# Model id is usually --served-model-name (often the GGUF file basename).
+# Prefer dense GGUF (e.g. qwen2.5-coder); some MoE GGUFs are unstable in SGLang.
+base_url = "http://127.0.0.1:30000/v1"
+api_key = "sglang"
+model = "qwen2.5-coder-32b-q4_k_m.gguf"
 
 [providers.xai]
 base_url = "https://api.x.ai/v1"

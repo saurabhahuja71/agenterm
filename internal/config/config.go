@@ -20,11 +20,12 @@ type Config struct {
 	// BaseURL is the OpenAI-compatible API root, e.g.
 	//   http://127.0.0.1:11434/v1   (local Ollama)
 	//   http://192.168.1.10:11434/v1 (remote Ollama on LAN)
+	//   http://127.0.0.1:30000/v1   (SGLang, local or SSH tunnel)
 	//   https://api.x.ai/v1
 	//   https://api.openai.com/v1
 	BaseURL string `toml:"base_url"`
 
-	// APIKey optional for Ollama; required for cloud providers.
+	// APIKey optional for Ollama/SGLang; required for cloud providers.
 	// Prefer env AGENTERM_API_KEY / OLLAMA_API_KEY / XAI_API_KEY / OPENAI_API_KEY.
 	APIKey string `toml:"api_key"`
 
@@ -49,7 +50,7 @@ type Config struct {
 	// MCPServers optional external MCP tool servers.
 	MCPServers []MCPServer `toml:"mcp_servers"`
 
-	// Providers optional named presets (ollama-local, ollama-remote, xai, …).
+	// Providers optional named presets (ollama-local, ollama-remote, sglang, xai, …).
 	Providers map[string]Provider `toml:"providers"`
 }
 
@@ -117,6 +118,13 @@ Tools (list_dir, read_file, write_file, str_replace, find_files, git, fetch, run
 				APIKey:  "ollama",
 				Model:   "qwen2.5-coder:32b",
 			},
+			// SGLang OpenAI-compatible server (default port 30000). Model id is usually
+			// the served-model-name (often the GGUF basename). Prefer dense GGUF weights.
+			"sglang": {
+				BaseURL: "http://127.0.0.1:30000/v1",
+				APIKey:  "sglang",
+				Model:   "qwen2.5-coder-32b-q4_k_m.gguf",
+			},
 			"xai": {
 				BaseURL: "https://api.x.ai/v1",
 				Model:   "grok-3",
@@ -164,9 +172,15 @@ func Load() (Config, string, error) {
 	if _, err := toml.DecodeFile(path, &cfg); err != nil {
 		return Config{}, path, fmt.Errorf("parse config %s: %w", path, err)
 	}
-	// Merge defaults for missing provider map
+	// Merge defaults for missing provider map / presets (e.g. older configs lack sglang).
 	if cfg.Providers == nil {
 		cfg.Providers = Default().Providers
+	} else {
+		for name, p := range Default().Providers {
+			if _, ok := cfg.Providers[name]; !ok {
+				cfg.Providers[name] = p
+			}
+		}
 	}
 	return applyEnv(cfg), path, nil
 }
@@ -253,8 +267,9 @@ func applyProvider(c Config, p Provider) Config {
 		out.APIKey = p.APIKey
 	}
 	// If top-level base_url was explicitly different and provider is custom-ish, keep top-level.
-	// For named providers we intentionally use provider.base_url so remote Ollama works:
+	// For named providers we intentionally use provider.base_url so remote Ollama/SGLang works:
 	// set [providers.ollama-remote] base_url = "http://gpu-box:11434/v1"
+	// set [providers.sglang] base_url = "http://127.0.0.1:30000/v1"
 	if c.Provider != "" && c.Provider != "custom" && p.BaseURL != "" {
 		out.BaseURL = p.BaseURL
 	}

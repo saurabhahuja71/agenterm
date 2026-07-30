@@ -32,12 +32,12 @@ agenterm is a **terminal client** (not a model host):
         │
         ▼
   OpenAI-compatible API
-  Ollama local/remote · xAI · OpenAI · …
+  Ollama · SGLang · xAI · OpenAI · …
 ```
 
 ## Why OpenAI-compatible?
 
-Local stacks (Ollama, vLLM, LocalAI) and many clouds speak:
+Local stacks (Ollama, SGLang, vLLM, LocalAI) and many clouds speak:
 
 `POST {base_url}/chat/completions`
 
@@ -47,10 +47,13 @@ One client covers:
 |--------|---------------------|
 | Local Ollama | `http://127.0.0.1:11434/v1` |
 | Remote Ollama | `http://192.168.1.50:11434/v1` |
+| SGLang (local / SSH tunnel) | `http://127.0.0.1:30000/v1` |
 | xAI | `https://api.x.ai/v1` |
 | OpenAI | `https://api.openai.com/v1` |
 
-Always include **`/v1`** for Ollama so `/v1/chat/completions` and `/v1/models` work.
+Always include **`/v1`** so `/v1/chat/completions` and `/v1/models` work (Ollama and SGLang both use this layout).
+
+**SGLang notes:** model id is the server’s `--served-model-name` (often a GGUF basename), not necessarily an Ollama tag. Preset: `provider = "sglang"`. See [README · SGLang](../README.md#sglang).
 
 ## Config resolution order
 
@@ -70,7 +73,7 @@ Later sources win:
 | **Built-in tools** | Files, git, optional shell — run on your machine |
 | **MCP** | Extra tools from external servers; agenterm is the **client** |
 
-Models are **not** bundled in the binary. You need Ollama (or another API) running somewhere reachable.
+Models are **not** bundled in the binary. You need Ollama, SGLang, or another API running somewhere reachable.
 
 ## Quiet by default
 

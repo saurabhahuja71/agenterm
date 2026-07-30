@@ -1,20 +1,21 @@
-# agenterm — Terminal AI Agent Tutorial (Ollama, OpenAI, xAI + MCP Client)
+# agenterm — Terminal AI Agent Tutorial (Ollama, SGLang, OpenAI, xAI + MCP Client)
 
-**Terminal AI agent** and **coding assistant in the terminal** for [Ollama](https://ollama.com), [xAI](https://x.ai), [OpenAI](https://openai.com), and any **OpenAI-compatible** API. Full-screen **TUI**, optional **file/shell tools**, and **[Model Context Protocol (MCP)](https://modelcontextprotocol.io)** client support—one static **Go** binary.
+**Terminal AI agent** and **coding assistant in the terminal** for [Ollama](https://ollama.com), [SGLang](https://github.com/sgl-project/sglang), [xAI](https://x.ai), [OpenAI](https://openai.com), and any **OpenAI-compatible** API. Full-screen **TUI**, optional **file/shell tools**, and **[Model Context Protocol (MCP)](https://modelcontextprotocol.io)** client support—one static **Go** binary.
 
 > **Lab 1** in the [AI · Agents · MCP learning path](https://github.com/saurabhahuja71/learning-path#7-ai--agents--mcp) · Audience: intermediate · Time: ~1 hour to first chat · Level: intermediate
 
-**SEO keywords:** *terminal AI agent*, *Ollama TUI*, *OpenAI compatible CLI agent*, *MCP client Go*, *local LLM coding agent*, *agenterm tutorial*, *AI pair programmer terminal*.
+**SEO keywords:** *terminal AI agent*, *Ollama TUI*, *SGLang OpenAI-compatible*, *OpenAI compatible CLI agent*, *MCP client Go*, *local LLM coding agent*, *agenterm tutorial*, *AI pair programmer terminal*.
 
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Go](https://img.shields.io/badge/Go-1.22+-00ADD8?logo=go)](https://go.dev/)
 [![Ollama](https://img.shields.io/badge/Ollama-compatible-black)](https://ollama.com)
+[![SGLang](https://img.shields.io/badge/SGLang-compatible-orange)](https://github.com/sgl-project/sglang)
 [![MCP](https://img.shields.io/badge/MCP-client-purple)](https://modelcontextprotocol.io)
 [![Release](https://img.shields.io/github/v/release/saurabhahuja71/agenterm?include_prereleases)](https://github.com/saurabhahuja71/agenterm/releases)
 
 | | |
 |---|---|
-| **Best for** | Developers who want Ollama (or any `/v1` chat API) in the terminal with optional coding tools |
+| **Best for** | Developers who want Ollama, SGLang, or any `/v1` chat API in the terminal with optional coding tools |
 | **Runs on** | Linux, macOS, Windows · Docker / Podman |
 | **Not** | A web UI or desktop app — pure terminal |
 
@@ -22,7 +23,7 @@
 You (TUI)
    │
    ▼
-agenterm  ──►  Ollama / xAI / OpenAI  (POST /v1/chat/completions)
+agenterm  ──►  Ollama / SGLang / xAI / OpenAI  (POST /v1/chat/completions)
    │
    └── tools ──► built-in (files, optional shell) + MCP servers
 ```
@@ -43,11 +44,16 @@ Binary goes to `~/.local/bin/agenterm`. If the shell cannot find it:
 export PATH="$HOME/.local/bin:$PATH"
 ```
 
-**2. Start Ollama** (local or already tunneled to your machine):
+**2. Start a backend** (pick one):
 
 ```bash
+# Ollama (default)
 ollama pull qwen2.5-coder:32b
 ollama serve   # http://127.0.0.1:11434
+
+# or SGLang (OpenAI-compatible on :30000 — see SGLang section below)
+# sglang serve --model-path /path/to/model.gguf --quantization gguf \
+#   --host 127.0.0.1 --port 30000 --served-model-name qwen2.5-coder-32b-q4_k_m.gguf
 ```
 
 **3. Chat:**
@@ -55,7 +61,11 @@ ollama serve   # http://127.0.0.1:11434
 ```bash
 agenterm init          # first time: writes ~/.agenterm/config.toml
 agenterm --ping        # check the API
-agenterm               # open the TUI
+agenterm               # open the TUI (Ollama default)
+
+# SGLang instead:
+agenterm --provider sglang --ping
+agenterm --provider sglang
 ```
 
 In the TUI: type a message and press **Enter**. Try `/help`, `/model`, or `/tools off` for pure chat.
@@ -68,6 +78,7 @@ In the TUI: type a message and press **Enter**. Try `/help`, `/model`, or `/tool
 - [Install](#install)
 - [Quick start](#quick-start)
 - [Local vs remote Ollama](#local-vs-remote-ollama)
+- [SGLang](#sglang)
 - [Docker / Podman](#docker--podman)
 - [CLI and in-chat commands](#cli-and-in-chat-commands)
 - [Configuration](#configuration)
@@ -84,6 +95,7 @@ In the TUI: type a message and press **Enter**. Try `/help`, `/model`, or `/tool
 | You want… | agenterm does… |
 |-----------|----------------|
 | Chat with **local LLMs** | Defaults to Ollama at `http://127.0.0.1:11434/v1` |
+| Faster **SGLang** serving | `--provider sglang` → `http://127.0.0.1:30000/v1` |
 | A **GPU box over the network** | `--base-url` or an SSH tunnel to localhost |
 | A **coding agent** in the shell | Tool loop: list/read/write files; optional shell; MCP |
 | Switch models mid-session | `/model` while chatting |
@@ -153,6 +165,34 @@ ssh -N -L 11434:127.0.0.1:11434 user@gpu-host
 agenterm
 ```
 
+### SGLang (local or tunneled)
+
+SGLang exposes the same OpenAI-compatible `/v1/chat/completions` surface. Default port in this project’s docs: **30000**.
+
+```bash
+# Server already on this machine (or tunnel already open):
+agenterm --provider sglang --ping
+agenterm --provider sglang
+agenterm --provider sglang --no-tools   # pure chat
+```
+
+SSH tunnel from a laptop to a GPU host:
+
+```bash
+ssh -N -L 30000:127.0.0.1:30000 user@gpu-host
+# or with a jump host:
+# ssh -N -J bastion -L 30000:127.0.0.1:30000 opc@gpu-host
+agenterm --provider sglang
+```
+
+Model id must match SGLang’s **`--served-model-name`** (often the GGUF basename). List with:
+
+```bash
+curl -s http://127.0.0.1:30000/v1/models
+# then:
+agenterm --provider sglang -m qwen2.5-coder-32b-q4_k_m.gguf
+```
+
 ### In the TUI
 
 | Action | How |
@@ -209,6 +249,100 @@ Full example: [`configs/config.example.toml`](configs/config.example.toml).
 
 ---
 
+## SGLang
+
+[SGLang](https://github.com/sgl-project/sglang) is an OpenAI-compatible inference server (often used with GGUF / multi-GPU). agenterm talks to it the same way as Ollama: `POST {base_url}/chat/completions`.
+
+| | Ollama (default) | SGLang |
+|--|------------------|--------|
+| Typical URL | `http://127.0.0.1:11434/v1` | `http://127.0.0.1:30000/v1` |
+| Provider preset | `ollama-local` / `ollama-remote` | `sglang` |
+| Model id | Ollama tag (`qwen2.5-coder:32b`) | `--served-model-name` (e.g. GGUF basename) |
+| API key | any string (e.g. `ollama`) | any string (e.g. `sglang`) |
+
+### Config (`~/.agenterm/config.toml`)
+
+```toml
+provider = "sglang"
+# optional top-level overrides; preset also sets these under [providers.sglang]
+
+[providers.sglang]
+base_url = "http://127.0.0.1:30000/v1"
+api_key = "sglang"
+# Must match the id returned by GET /v1/models
+model = "qwen2.5-coder-32b-q4_k_m.gguf"
+```
+
+Or keep Ollama as default and only switch on the CLI:
+
+```bash
+agenterm --provider sglang
+agenterm --base-url http://127.0.0.1:30000/v1 -m qwen2.5-coder-32b-q4_k_m.gguf --api-key sglang
+```
+
+Env equivalent:
+
+```bash
+export AGENTERM_PROVIDER=sglang
+export AGENTERM_BASE_URL=http://127.0.0.1:30000/v1
+export AGENTERM_MODEL=qwen2.5-coder-32b-q4_k_m.gguf
+export AGENTERM_API_KEY=sglang
+agenterm --ping && agenterm
+```
+
+### Start SGLang (sketch)
+
+On the GPU host (adjust paths, tensor-parallel size, and context to your hardware):
+
+```bash
+# Example: dense Qwen2.5 coder GGUF, OpenAI API on localhost:30000
+sglang serve \
+  --model-path /path/to/qwen2.5-coder-32b-q4_k_m.gguf \
+  --quantization gguf \
+  --host 127.0.0.1 \
+  --port 30000 \
+  --tp-size 2 \
+  --context-length 32768 \
+  --served-model-name qwen2.5-coder-32b-q4_k_m.gguf \
+  --trust-remote-code
+```
+
+Prefer **dense** GGUF weights for stability. Some **MoE** GGUFs (e.g. certain qwen3-coder builds) can fail at runtime depending on the SGLang build—use Ollama for those tags if needed.
+
+### Remote GPU + SSH tunnel
+
+SGLang is often bound to **`127.0.0.1` only** on the GPU box (no public ingress). From your workstation:
+
+```bash
+ssh -N -L 30000:127.0.0.1:30000 user@gpu-host
+# jump host:
+# ssh -N -J bastion -L 30000:127.0.0.1:30000 opc@gpu-host
+
+curl -s http://127.0.0.1:30000/v1/models
+agenterm --provider sglang --ping
+agenterm --provider sglang
+```
+
+If you use a corporate HTTP proxy, exclude localhost so the tunnel is not proxied:
+
+```bash
+export no_proxy="localhost,127.0.0.1,${no_proxy:-}"
+export NO_PROXY="localhost,127.0.0.1,${NO_PROXY:-}"
+```
+
+### Ollama vs SGLang on the same GPUs
+
+Do **not** load a heavy Ollama model and a heavy SGLang model on the same GPUs at once (memory contention). Unload Ollama keep-alives before starting SGLang, or stop the SGLang service before `ollama run` of a large tag.
+
+| Goal | Suggested path |
+|------|----------------|
+| Everyday chat / tags from `ollama list` | Ollama · `agenterm` (default) |
+| Lower-latency GGUF serve, multi-GPU TP | SGLang · `agenterm --provider sglang` |
+
+Always include **`/v1`** on the base URL (`/v1/chat/completions`, `/v1/models`).
+
+---
+
 ## Docker / Podman
 
 Prefer the **native binary** for daily use. Use a container when you want a locked-down runtime.
@@ -230,10 +364,10 @@ From this repo:
 | Need | Why |
 |------|-----|
 | `-it` / TTY | Interactive TUI |
-| `--network=host` (Linux) | Reach host Ollama at `127.0.0.1:11434` |
+| `--network=host` (Linux) | Reach host Ollama (`:11434`) or SGLang (`:30000`) |
 | Volume `~/.agenterm` | Persist config |
 
-On **macOS Docker Desktop**, use `http://host.docker.internal:11434/v1` for host Ollama.
+On **macOS Docker Desktop**, use `http://host.docker.internal:11434/v1` for host Ollama (or `:30000` for host SGLang).
 
 ```bash
 export DOCKER_HOST=unix:///run/user/$(id -u)/podman/podman.sock   # rootless Podman
@@ -252,7 +386,9 @@ agenterm init             # default config (--force to overwrite)
 agenterm --ping           # connectivity check
 agenterm -m qwen2.5       # start with a model
 agenterm --provider ollama-remote
+agenterm --provider sglang
 agenterm --base-url http://host:11434/v1
+agenterm --base-url http://127.0.0.1:30000/v1 -m qwen2.5-coder-32b-q4_k_m.gguf
 agenterm --no-tools       # pure chat (faster)
 agenterm --shell          # allow run_shell
 agenterm --no-mcp
@@ -279,9 +415,9 @@ Greetings skip tools automatically. For fully tool-free sessions: `/tools off`, 
 
 | Env | Meaning |
 |-----|---------|
-| `AGENTERM_BASE_URL` | API root (e.g. `http://127.0.0.1:11434/v1`) |
-| `AGENTERM_MODEL` | Model id / Ollama tag |
-| `AGENTERM_PROVIDER` | `ollama-local`, `ollama-remote`, `xai`, `openai`, `custom` |
+| `AGENTERM_BASE_URL` | API root (e.g. `http://127.0.0.1:11434/v1` or `http://127.0.0.1:30000/v1`) |
+| `AGENTERM_MODEL` | Model id / Ollama tag / SGLang served name |
+| `AGENTERM_PROVIDER` | `ollama-local`, `ollama-remote`, `sglang`, `xai`, `openai`, `custom` |
 | `AGENTERM_ENABLE_TOOLS` | `0`/`false` off · `1`/`true` on |
 | `AGENTERM_API_KEY` / `OLLAMA_API_KEY` / `XAI_API_KEY` / `OPENAI_API_KEY` | Auth |
 | `AGENTERM_CONFIG` | Path to config file |
@@ -325,7 +461,7 @@ Disable for a session: `agenterm --no-mcp`. Demo server: [mcp-demo](https://gith
 
 ### What is agenterm?
 
-An open-source **terminal AI agent** in Go: a full-screen TUI that streams chat from Ollama or any OpenAI-compatible API, with optional tools (files, shell, MCP).
+An open-source **terminal AI agent** in Go: a full-screen TUI that streams chat from Ollama, SGLang, or any OpenAI-compatible API, with optional tools (files, shell, MCP).
 
 ### Is it an Ollama GUI?
 
@@ -334,6 +470,10 @@ No—it is a **terminal TUI**, not a web or desktop GUI. Use it when you want ch
 ### Can I use remote Ollama or an SSH tunnel?
 
 Yes. Point `base_url` / `--base-url` at the host, or tunnel remote Ollama to `127.0.0.1:11434` and keep the default URL.
+
+### Does it work with SGLang?
+
+Yes. `--provider sglang` (default `http://127.0.0.1:30000/v1`), or any custom base URL that exposes `/v1/chat/completions`. Use the **served model name** from `GET /v1/models`, not the Ollama tag, unless you set them to match. See [SGLang](#sglang).
 
 ### Does it work with xAI Grok and OpenAI?
 
@@ -387,7 +527,7 @@ Chat **replies** come from the LLM. MCP only supplies **tools**. Models are **no
 More detail: [`docs/how-it-works.md`](docs/how-it-works.md).  
 Roadmap (Grok-class UX): [`docs/grok-parity-roadmap.md`](docs/grok-parity-roadmap.md).
 
-**Notes:** Ollama must expose the OpenAI-compatible API (default). Tool quality depends on the model (`qwen2.5`, `llama3.1+` work better than tiny models).
+**Notes:** Ollama and SGLang must expose the OpenAI-compatible API (default for both). Tool quality depends on the model (`qwen2.5`, `llama3.1+` work better than tiny models).
 
 ---
 
@@ -439,4 +579,4 @@ MIT — free to use, modify, and distribute.
 
 Suggested topics for the About sidebar:
 
-`ai` · `terminal` · `cli` · `tui` · `ollama` · `llm` · `openai` · `mcp` · `agent` · `golang` · `bubbletea` · `coding-assistant` · `local-llm`
+`ai` · `terminal` · `cli` · `tui` · `ollama` · `sglang` · `llm` · `openai` · `mcp` · `agent` · `golang` · `bubbletea` · `coding-assistant` · `local-llm`
