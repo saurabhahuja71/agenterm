@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/charmbracelet/bubbles/key"
 	"github.com/charmbracelet/bubbles/textarea"
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
@@ -36,6 +37,12 @@ var (
 	colorError  = lipgloss.Color("#f87171")
 	colorBorder = lipgloss.Color("#1e293b")
 
+	// Bubble backgrounds: light grey (You) vs white/slate (Agent) so Q/A
+	// are distinct on light terminals; AdaptiveColor keeps dark terminals readable.
+	bgUser = lipgloss.AdaptiveColor{Light: "#e5e7eb", Dark: "#1e293b"} // light grey / slate
+	bgAsst = lipgloss.AdaptiveColor{Light: "#ffffff", Dark: "#0f172a"} // white / near-black
+	fgBody = lipgloss.AdaptiveColor{Light: "#1e293b", Dark: "#e2e8f0"}
+
 	styleHeader = lipgloss.NewStyle().Foreground(colorAccent).Bold(true).Padding(0, 1)
 	styleStatus = lipgloss.NewStyle().Foreground(colorMuted).Padding(0, 1)
 	styleHelp   = lipgloss.NewStyle().Foreground(colorMuted).Padding(0, 1)
@@ -44,6 +51,15 @@ var (
 	styleTool   = lipgloss.NewStyle().Foreground(colorTool)
 	styleErr    = lipgloss.NewStyle().Foreground(colorError)
 	styleBox    = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(colorBorder).Padding(0, 1)
+
+	styleUserBubble = lipgloss.NewStyle().
+			Background(bgUser).
+			Foreground(fgBody).
+			Padding(0, 1)
+	styleAsstBubble = lipgloss.NewStyle().
+			Background(bgAsst).
+			Foreground(fgBody).
+			Padding(0, 1)
 )
 
 // Deps wired from main.
@@ -56,6 +72,9 @@ type Deps struct {
 type chatLine struct {
 	role string
 	text string
+	// mdCache holds glamour output for role=="assistant". Invalidated when text changes.
+	mdCache string
+	mdSrc   string // text that mdCache was built from
 }
 
 type model struct {
@@ -82,7 +101,19 @@ type model struct {
 	scrubLeft int
 	// modelPick: interactive /model list (Tab cycle, Enter select, Esc cancel).
 	modelPick *modelPicker
+	// paintThrottle: avoid full viewport rebuilds on every token (large answers hang).
+	lastPaint    time.Time
+	paintPending bool
 }
+
+// paintInterval is the minimum time between streaming viewport rebuilds.
+const paintInterval = 80 * time.Millisecond
+
+// glamourMaxBytes skips markdown rendering above this size (too slow for TUI).
+const glamourMaxBytes = 24_000
+
+// bubbleMaxBytes uses cheap plain paint instead of lipgloss Width for large bodies.
+const bubbleMaxBytes = 8_000
 
 // modelPicker is the interactive model selector opened by /model.
 type modelPicker struct {
@@ -93,6 +124,7 @@ type modelPicker struct {
 type streamEvMsg agent.Event
 type streamClosedMsg struct{}
 type busyTickMsg time.Time
+type paintDueMsg struct{}
 
 func New(deps Deps) model {
 	ta := textarea.New()
@@ -108,6 +140,38 @@ func New(deps Deps) model {
 	ta.KeyMap.InsertNewline.SetEnabled(true)
 
 	vp := viewport.New(80, 20)
+	// Pager keys that don't fight the focused textarea (no j/k/f/b/space).
+	// Mouse wheel works when tea.WithMouseCellMotion is set in Run().
+	vp.MouseWheelEnabled = true
+	vp.MouseWheelDelta = 3
+	vp.KeyMap = viewport.KeyMap{
+		PageDown: key.NewBinding(
+			key.WithKeys("pgdown", "ctrl+f"),
+			key.WithHelp("pgdn", "page down"),
+		),
+		PageUp: key.NewBinding(
+			key.WithKeys("pgup", "ctrl+b"),
+			key.WithHelp("pgup", "page up"),
+		),
+		HalfPageUp: key.NewBinding(
+			key.WithKeys("ctrl+u"),
+			key.WithHelp("ctrl+u", "½ page up"),
+		),
+		HalfPageDown: key.NewBinding(
+			key.WithKeys("ctrl+d"),
+			key.WithHelp("ctrl+d", "½ page down"),
+		),
+		Up: key.NewBinding(
+			key.WithKeys("ctrl+up"),
+			key.WithHelp("ctrl+↑", "up"),
+		),
+		Down: key.NewBinding(
+			key.WithKeys("ctrl+down"),
+			key.WithHelp("ctrl+↓", "down"),
+		),
+		Left:  key.NewBinding(key.WithKeys("ctrl+left"), key.WithHelp("ctrl+←", "left")),
+		Right: key.NewBinding(key.WithKeys("ctrl+right"), key.WithHelp("ctrl+→", "right")),
+	}
 
 	// Fixed dark style — WithAutoStyle() queries OSC 11 (bg color) and the
 	// reply often appears as garbage in the input line on first launch.
@@ -254,6 +318,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.modelPick != nil {
 			return m.handleModelPickKeys(msg)
 		}
+		// Chat scroll keys — handle before the textarea so large answers are reachable.
+		if m.handleChatScrollKey(msg) {
+			return m, nil
+		}
 		switch msg.String() {
 		case "esc":
 			// Cancel in-flight generation without quitting the TUI.
@@ -292,6 +360,17 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.ta.Reset()
 			return m.handleSubmit(text)
 		}
+		// While busy, arrow keys also scroll the transcript (textarea is inactive).
+		if m.busy {
+			switch msg.String() {
+			case "up", "k":
+				m.vp.ScrollUp(1)
+				return m, nil
+			case "down", "j":
+				m.vp.ScrollDown(1)
+				return m, nil
+			}
+		}
 
 	case busyTickMsg:
 		if m.busy {
@@ -302,91 +381,45 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			} else if m.status == "" || m.status == "ready" || strings.HasPrefix(m.status, "Thinking") {
 				m.status = fmt.Sprintf("Thinking… %ds · working", m.waitSecs)
 			}
-			m.upsertThinkingPlaceholder()
-			m.refreshViewport()
+			// Only rebuild chat when the Thinking placeholder is visible. Never re-paint
+			// a large streaming answer every 200ms (that freezes the TUI).
+			if m.showingThinkingOnly() {
+				m.upsertThinkingPlaceholder()
+				m.refreshViewport()
+			}
+			// Header spinner/status re-render via View() without viewport rebuild.
 			return m, busyTick()
+		}
+
+	case paintDueMsg:
+		if m.paintPending {
+			m.paintPending = false
+			m.refreshViewport()
+		}
+
+	case streamBatchMsg:
+		// Coalesced tokens + the next control event from waitNext.
+		var cmd tea.Cmd
+		m, cmd = m.applyStreamEvent(agent.Event{Kind: agent.EventToken, Text: msg.tokenText})
+		if cmd != nil {
+			cmds = append(cmds, cmd)
+		}
+		var cmd2 tea.Cmd
+		m, cmd2 = m.applyStreamEvent(msg.next)
+		if cmd2 != nil {
+			cmds = append(cmds, cmd2)
+		}
+		if m.events != nil {
+			cmds = append(cmds, waitNext(m.events))
 		}
 
 	case streamEvMsg:
 		ev := agent.Event(msg)
-		switch ev.Kind {
-		case agent.EventToken:
-			m.gotToken = true
-			// Quiet mode: buffer tokens but don't paint pure tool-JSON noise live.
-			m.ensureStream().WriteString(ev.Text)
-			cur := m.stream.String()
-			if m.verbose || !isMostlyToolNoise(cur) {
-				m.clearThinkingPlaceholder()
-				m.upsertStreamingAssistant(cur)
-			} else {
-				// Keep status only; drop any partial tool-JSON bubble.
-				m.dropStreamingAssistant()
-				m.upsertThinkingPlaceholder()
-			}
-			m.status = fmt.Sprintf("streaming… %s", spinnerFrame())
-			m.refreshViewport()
-		case agent.EventToolStart:
-			m.gotToken = true
-			if m.verbose {
-				m.flushStreamAsLine()
-				m.lines = append(m.lines, chatLine{
-					role: "tool",
-					text: formatToolStart(ev.Tool, ev.Text, true),
-				})
-			} else {
-				// Quiet: drop model preambles/JSON; tools only in the status bar (not chat).
-				m.dropStreamIfNoise()
-			}
-			m.status = formatToolStart(ev.Tool, ev.Text, false)
-			m.upsertThinkingPlaceholder()
-			m.refreshViewport()
-		case agent.EventToolEnd:
-			line := formatToolEnd(ev.Tool, ev.ToolOut, m.verbose)
-			if m.verbose {
-				m.lines = append(m.lines, chatLine{role: "tool", text: line})
-			}
-			// Quiet: only surface unexpected tool errors in chat. Network refusals during
-			// link-check/fetch are summarized in the final report (not one Error block each).
-			if !m.verbose && strings.HasPrefix(strings.TrimSpace(ev.ToolOut), "error:") {
-				if !isBenignToolFailure(ev.Tool, ev.ToolOut) {
-					m.lines = append(m.lines, chatLine{role: "error", text: line})
-				}
-			}
-			m.status = line
-			m.upsertThinkingPlaceholder()
-			m.refreshViewport()
-		case agent.EventStatus:
-			// Status bar only — do not spam the chat transcript.
-			if ev.Text != "" {
-				m.status = ev.Text
-			}
-			m.upsertThinkingPlaceholder()
-			m.refreshViewport()
-		case agent.EventError:
-			m.clearThinkingPlaceholder()
-			m.flushStreamAsLine()
-			m.lines = append(m.lines, chatLine{role: "error", text: ev.Text})
-			m.status = "error"
-			m.refreshViewport()
-		case agent.EventDone:
-			m.clearThinkingPlaceholder()
-			// Final answer: show stream unless it's leftover tool JSON.
-			if m.verbose {
-				m.flushStreamAsLine()
-			} else {
-				m.flushStreamAsLineQuiet()
-			}
-			m.busy = false
-			m.gotToken = false
-			m.waitSecs = 0
-			m.status = "ready"
-			m.cancel = nil
-			if _, err := m.deps.Agent.SaveSession("last"); err == nil {
-				// rolling checkpoint
-			}
-			m.refreshViewport()
+		var cmd tea.Cmd
+		m, cmd = m.applyStreamEvent(ev)
+		if cmd != nil {
+			cmds = append(cmds, cmd)
 		}
-		// Keep reading the channel
 		if m.events != nil {
 			cmds = append(cmds, waitNext(m.events))
 		}
@@ -401,6 +434,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.busy = false
 		m.gotToken = false
 		m.waitSecs = 0
+		m.paintPending = false
 		m.status = "ready"
 		m.events = nil
 		m.cancel = nil
@@ -442,31 +476,30 @@ func (m model) handleSubmit(text string) (tea.Model, tea.Cmd) {
 	m.waitSecs = 0
 	m.busySince = time.Now()
 	m.status = fmt.Sprintf("Thinking… (%s)", m.deps.Agent.Cfg.Model)
+	// New turn: jump to the latest content so the question is visible.
+	m.vp.GotoBottom()
 	m.upsertThinkingPlaceholder()
 	m.refreshViewport()
 
 	ctx, cancel := context.WithCancel(context.Background())
 	m.cancel = cancel
-	ch := make(chan agent.Event, 1024)
+	// Large buffer + coalescing in waitNext; do not drop tokens (incomplete answers).
+	ch := make(chan agent.Event, 8192)
 	m.events = ch
+	m.paintPending = false
 	ag := m.deps.Agent
 
 	go func() {
 		_ = ag.RunUserMessage(ctx, text, func(ev agent.Event) {
-			// Never block the agent forever if the UI falls behind (prevents "hang").
+			// Prefer non-blocking send; if full, block with cancel so we never drop
+			// tokens (dropped tokens used to produce incomplete large answers).
 			select {
 			case ch <- ev:
 			case <-ctx.Done():
 			default:
-				// Buffer full: drop pure tokens; block briefly for control events.
-				if ev.Kind == agent.EventToken {
-					return
-				}
 				select {
 				case ch <- ev:
 				case <-ctx.Done():
-				case <-time.After(2 * time.Second):
-					// last resort: drop so tool loop can continue
 				}
 			}
 		})
@@ -476,14 +509,166 @@ func (m model) handleSubmit(text string) (tea.Model, tea.Cmd) {
 	return m, tea.Batch(waitNext(ch), busyTick())
 }
 
+// waitNext reads the next event and coalesces consecutive tokens so the UI
+// does not process thousands of single-character messages for large answers.
 func waitNext(ch <-chan agent.Event) tea.Cmd {
 	return func() tea.Msg {
 		ev, ok := <-ch
 		if !ok {
 			return streamClosedMsg{}
 		}
-		return streamEvMsg(ev)
+		if ev.Kind != agent.EventToken {
+			return streamEvMsg(ev)
+		}
+		// Merge as many pending tokens as are already buffered.
+		var b strings.Builder
+		b.WriteString(ev.Text)
+		for {
+			select {
+			case next, ok := <-ch:
+				if !ok {
+					// Tokens then closed — deliver tokens; closed handled on next wait.
+					return streamEvMsg(agent.Event{Kind: agent.EventToken, Text: b.String()})
+				}
+				if next.Kind == agent.EventToken {
+					b.WriteString(next.Text)
+					continue
+				}
+				return streamBatchMsg{tokenText: b.String(), next: next}
+			default:
+				return streamEvMsg(agent.Event{Kind: agent.EventToken, Text: b.String()})
+			}
+		}
 	}
+}
+
+// streamBatchMsg is a coalesced token chunk plus the following non-token event.
+type streamBatchMsg struct {
+	tokenText string
+	next      agent.Event
+}
+
+// showingThinkingOnly is true when chat shows the Thinking placeholder (no stream yet).
+func (m *model) showingThinkingOnly() bool {
+	if len(m.lines) == 0 {
+		return true
+	}
+	last := m.lines[len(m.lines)-1]
+	return last.role == "thinking" || (last.role == "assistant-stream" && strings.TrimSpace(last.text) == "")
+}
+
+// schedulePaint throttles expensive viewport rebuilds during streaming.
+func (m *model) schedulePaint(force bool) tea.Cmd {
+	if force {
+		m.paintPending = false
+		m.refreshViewport()
+		return nil
+	}
+	now := time.Now()
+	if now.Sub(m.lastPaint) >= paintInterval {
+		m.paintPending = false
+		m.refreshViewport()
+		return nil
+	}
+	if m.paintPending {
+		return nil
+	}
+	m.paintPending = true
+	wait := paintInterval - now.Sub(m.lastPaint)
+	if wait < time.Millisecond {
+		wait = time.Millisecond
+	}
+	return tea.Tick(wait, func(time.Time) tea.Msg { return paintDueMsg{} })
+}
+
+func (m model) applyStreamEvent(ev agent.Event) (model, tea.Cmd) {
+	switch ev.Kind {
+	case agent.EventToken:
+		m.gotToken = true
+		m.ensureStream().WriteString(ev.Text)
+		cur := m.stream.String()
+		// Sample head for noise check so large answers aren't scanned fully each batch.
+		check := cur
+		if len(check) > 1200 {
+			check = check[:1200]
+		}
+		if m.verbose || !isMostlyToolNoise(check) {
+			m.clearThinkingPlaceholder()
+			m.upsertStreamingAssistant(cur)
+		} else {
+			// Keep status only; drop any partial tool-JSON bubble.
+			m.dropStreamingAssistant()
+			m.upsertThinkingPlaceholder()
+		}
+		m.status = fmt.Sprintf("streaming… %s", spinnerFrame())
+		return m, m.schedulePaint(false)
+
+	case agent.EventToolStart:
+		m.gotToken = true
+		if m.verbose {
+			m.flushStreamAsLine()
+			m.lines = append(m.lines, chatLine{
+				role: "tool",
+				text: formatToolStart(ev.Tool, ev.Text, true),
+			})
+		} else {
+			m.dropStreamIfNoise()
+		}
+		m.status = formatToolStart(ev.Tool, ev.Text, false)
+		m.upsertThinkingPlaceholder()
+		return m, m.schedulePaint(true)
+
+	case agent.EventToolEnd:
+		line := formatToolEnd(ev.Tool, ev.ToolOut, m.verbose)
+		if m.verbose {
+			m.lines = append(m.lines, chatLine{role: "tool", text: line})
+		}
+		if !m.verbose && strings.HasPrefix(strings.TrimSpace(ev.ToolOut), "error:") {
+			if !isBenignToolFailure(ev.Tool, ev.ToolOut) {
+				m.lines = append(m.lines, chatLine{role: "error", text: line})
+			}
+		}
+		m.status = line
+		m.upsertThinkingPlaceholder()
+		return m, m.schedulePaint(true)
+
+	case agent.EventStatus:
+		if ev.Text != "" {
+			m.status = ev.Text
+		}
+		// Status only: update thinking line if visible; skip full paint when streaming.
+		if m.showingThinkingOnly() {
+			m.upsertThinkingPlaceholder()
+			return m, m.schedulePaint(true)
+		}
+		return m, nil
+
+	case agent.EventError:
+		m.clearThinkingPlaceholder()
+		m.flushStreamAsLine()
+		m.lines = append(m.lines, chatLine{role: "error", text: ev.Text})
+		m.status = "error"
+		return m, m.schedulePaint(true)
+
+	case agent.EventDone:
+		m.clearThinkingPlaceholder()
+		if m.verbose {
+			m.flushStreamAsLine()
+		} else {
+			m.flushStreamAsLineQuiet()
+		}
+		m.busy = false
+		m.gotToken = false
+		m.waitSecs = 0
+		m.paintPending = false
+		m.status = "ready"
+		m.cancel = nil
+		if _, err := m.deps.Agent.SaveSession("last"); err == nil {
+			// rolling checkpoint
+		}
+		return m, m.schedulePaint(true)
+	}
+	return m, nil
 }
 
 func (m model) handleSlash(text string) (tea.Model, tea.Cmd) {
@@ -737,7 +922,10 @@ Keys:
   Esc / /stop     Cancel in-flight reply
   Ctrl+C          Cancel if busy; quit when idle
   Ctrl+L          Clear history
-  PgUp / PgDn     Scroll
+  PgUp / PgDn     Scroll chat (also Ctrl+U / Ctrl+D half-page)
+  Ctrl+↑ / Ctrl+↓ Line scroll · Home / End jump
+  Mouse wheel     Scroll chat
+  ↑ / ↓ (busy)    Scroll while agent is working
 `)
 }
 
@@ -1394,33 +1582,69 @@ func toolArgHint(argsJSON string) string {
 	return truncate(argsJSON, 48)
 }
 
+// chatBubble paints a full-width message block so light-grey vs white (or
+// dark-slate variants) separates user questions from agent answers.
+// Large bodies skip lipgloss Width (O(lines) and freezes the TUI on big answers).
+func chatBubble(base lipgloss.Style, label, body string, width int) string {
+	if width < 10 {
+		width = 10
+	}
+	if len(body) > bubbleMaxBytes {
+		// Fast path: label strip + plain body (still scrollable).
+		return base.Width(width).Render(label) + "\n" + body
+	}
+	return base.Width(width).Render(label + "\n" + body)
+}
+
+func (m *model) renderAssistantBody(ln *chatLine, width int) string {
+	if ln.role == "assistant-stream" || m.renderer == nil || ln.text == "" {
+		return wrap(ln.text, width-4)
+	}
+	// Reuse cached glamour output when text is unchanged.
+	if ln.mdCache != "" && ln.mdSrc == ln.text {
+		return ln.mdCache
+	}
+	// Huge markdown through glamour blocks the event loop for seconds.
+	if len(ln.text) > glamourMaxBytes {
+		out := wrap(ln.text, width-4)
+		ln.mdCache = out
+		ln.mdSrc = ln.text
+		return out
+	}
+	if out, err := m.renderer.Render(ln.text); err == nil {
+		out = strings.TrimRight(out, "\n")
+		ln.mdCache = out
+		ln.mdSrc = ln.text
+		return out
+	}
+	return wrap(ln.text, width-4)
+}
+
 func (m *model) refreshViewport() {
 	var b strings.Builder
 	width := m.vp.Width
 	if width < 20 {
 		width = 80
 	}
-	for _, ln := range m.lines {
+	for i := range m.lines {
+		ln := &m.lines[i]
 		switch ln.role {
 		case "user":
-			b.WriteString(styleUser.Render("You") + "\n")
-			b.WriteString(wrap(ln.text, width) + "\n\n")
+			label := styleUser.Background(bgUser).Render("You")
+			body := wrap(ln.text, width-4)
+			b.WriteString(chatBubble(styleUserBubble, label, body, width) + "\n\n")
 		case "assistant", "assistant-stream":
-			label := "Agent"
+			labelText := "Agent"
 			if ln.role == "assistant-stream" {
-				label = "Agent …"
+				labelText = "Agent …"
 			}
-			b.WriteString(styleAsst.Render(label) + "\n")
-			rendered := ln.text
-			if m.renderer != nil && ln.role == "assistant" && len(ln.text) > 0 {
-				if out, err := m.renderer.Render(ln.text); err == nil {
-					rendered = strings.TrimRight(out, "\n")
-				}
-			}
-			b.WriteString(rendered + "\n\n")
+			label := styleAsst.Background(bgAsst).Render(labelText)
+			rendered := m.renderAssistantBody(ln, width)
+			b.WriteString(chatBubble(styleAsstBubble, label, rendered, width) + "\n\n")
 		case "thinking":
-			b.WriteString(styleAsst.Render("Agent") + "\n")
-			b.WriteString(styleStatus.Render(wrap(ln.text, width)) + "\n\n")
+			label := styleAsst.Background(bgAsst).Render("Agent")
+			body := styleStatus.Background(bgAsst).Render(wrap(ln.text, width-4))
+			b.WriteString(chatBubble(styleAsstBubble, label, body, width) + "\n\n")
 		case "tool":
 			b.WriteString(styleTool.Render("Tool") + "\n")
 			b.WriteString(styleTool.Render(wrap(ln.text, width)) + "\n\n")
@@ -1431,8 +1655,48 @@ func (m *model) refreshViewport() {
 			b.WriteString(styleStatus.Render(wrap(ln.text, width)) + "\n\n")
 		}
 	}
+	// Stick to bottom only when already following the latest lines. If the user
+	// scrolled up to read a long answer, keep their YOffset across refreshes
+	// (streaming / busy ticks would otherwise yank them back down).
+	atBottom := m.vp.AtBottom()
 	m.vp.SetContent(b.String())
-	m.vp.GotoBottom()
+	if atBottom {
+		m.vp.GotoBottom()
+	}
+	m.lastPaint = time.Now()
+}
+
+// handleChatScrollKey scrolls the transcript for pager-style keys. Returns true
+// when the key was consumed so the textarea does not also handle it.
+func (m *model) handleChatScrollKey(msg tea.KeyMsg) bool {
+	km := m.vp.KeyMap
+	switch {
+	case key.Matches(msg, km.PageUp):
+		m.vp.PageUp()
+		return true
+	case key.Matches(msg, km.PageDown):
+		m.vp.PageDown()
+		return true
+	case key.Matches(msg, km.HalfPageUp):
+		m.vp.HalfPageUp()
+		return true
+	case key.Matches(msg, km.HalfPageDown):
+		m.vp.HalfPageDown()
+		return true
+	case key.Matches(msg, km.Up):
+		m.vp.ScrollUp(1)
+		return true
+	case key.Matches(msg, km.Down):
+		m.vp.ScrollDown(1)
+		return true
+	case msg.String() == "home", msg.String() == "ctrl+home":
+		m.vp.GotoTop()
+		return true
+	case msg.String() == "end", msg.String() == "ctrl+end":
+		m.vp.GotoBottom()
+		return true
+	}
+	return false
 }
 
 func (m model) View() string {
@@ -1446,11 +1710,16 @@ func (m model) View() string {
 	} else {
 		header += styleStatus.Render("  ·  " + m.status)
 	}
+	// Hint when chat history is taller than the viewport.
+	if !m.vp.AtTop() || !m.vp.AtBottom() {
+		pct := int(m.vp.ScrollPercent() * 100)
+		header += styleStatus.Render(fmt.Sprintf("  ·  scroll %d%% (pgup/pgdn · wheel)", pct))
+	}
 	mode := "quiet"
 	if m.verbose {
 		mode = "verbose"
 	}
-	help := styleHelp.Render("enter send · alt+enter newline · esc cancel · /" + mode + " · /help · /model · /plan · ctrl+l")
+	help := styleHelp.Render("enter send · alt+enter newline · pgup/pgdn scroll · wheel · esc cancel · /" + mode + " · /help · /model · /plan · ctrl+l")
 	if m.deps.Agent != nil && m.deps.Agent.PlanMode {
 		help = styleHelp.Render("PLAN MODE · enter send · /plan off to use tools · /help")
 	}
@@ -1522,7 +1791,11 @@ func Run(deps Deps) error {
 	if os.Getenv("GLAMOUR_STYLE") == "" {
 		_ = os.Setenv("GLAMOUR_STYLE", "dark")
 	}
-	p := tea.NewProgram(New(deps), tea.WithAltScreen())
+	p := tea.NewProgram(
+		New(deps),
+		tea.WithAltScreen(),
+		tea.WithMouseCellMotion(), // mouse wheel scrolls the chat viewport
+	)
 	_, err := p.Run()
 	return err
 }
