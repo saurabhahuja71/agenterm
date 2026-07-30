@@ -1,0 +1,42 @@
+# Prefer toolcall rewrite proxy when using SGLang locally:
+#   python3 scripts/sglang-toolcall-proxy.py
+#   base: http://127.0.0.1:30001/v1
+#   or: scripts/vtcode-sglang-local.sh chat
+
+# Workspace VT Code config (agenterm + local SGLang/Ollama)
+# Global defaults: ~/.vtcode/vtcode.toml
+
+[agent]
+# Progressive schemas keep the wire small; Qwen still needs clear text-tool
+# instructions (see instruction_files) when SGLang omits native tool_calls.
+tool_documentation_mode = "progressive"
+temperature = 0.4
+reasoning_effort = "none"
+
+instruction_files = [
+  ".vtcode/instructions/sglang-tool-format.md",
+]
+
+[agent.small_model]
+enabled = true
+model = "qwen2.5-coder-32b-q4_k_m.gguf"
+temperature = 0.2
+use_for_large_reads = true
+use_for_web_summary = true
+use_for_git_history = true
+use_for_memory = true
+
+[tools]
+# Avoid HITL stalls when the model emits recoverable text tools in --print/exec.
+default_policy = "allow"
+
+[tools.policies]
+exec_command = "allow"
+write_stdin = "allow"
+code_search = "allow"
+apply_patch = "prompt"
+request_user_input = "allow"
+
+[mcp]
+# Keep MCP off by default in this repo; enable per-session when needed.
+enabled = false

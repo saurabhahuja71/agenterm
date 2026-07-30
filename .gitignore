@@ -12,3 +12,8 @@ vendor/
 .env.*
 !.env.example
 dist/
+
+# VT Code local runtime (keep instructions under version control)
+.vtcode/**
+!.vtcode/instructions/
+!.vtcode/instructions/**
