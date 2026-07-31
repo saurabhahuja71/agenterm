@@ -54,7 +54,7 @@ func (m *Manager) Connect(ctx context.Context, s config.MCPServer) error {
 	if name == "" {
 		name = "mcp"
 	}
-	client := mcp.NewClient(&mcp.Implementation{Name: "agenterm", Version: "0.1.0"}, nil)
+	client := mcp.NewClient(&mcp.Implementation{Name: "agenterm", Version: "1.0.0"}, nil)
 
 	var transport mcp.Transport
 	switch {

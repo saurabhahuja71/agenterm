@@ -16,7 +16,7 @@ import (
 )
 
 var (
-	version = "0.3.0"
+	version = "1.0.0"
 	flagProvider string
 	flagModel    string
 	flagBaseURL  string
