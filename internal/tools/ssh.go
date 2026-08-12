@@ -30,6 +30,12 @@ func (sshExecute) Run(ctx context.Context, argsJSON string) (string, error) {
 	if in.Timeout <= 0 { in.Timeout = 30 }
 	ctx, cancel := context.WithTimeout(ctx, time.Duration(in.Timeout*float64(time.Second))); defer cancel()
 	config := os.Getenv("SSH_CONFIG_PATH")
+	if config == "" {
+		if home, err := os.UserHomeDir(); err == nil {
+			candidate := home + "/.ssh/config"
+			if _, err := os.Stat(candidate); err == nil { config = candidate }
+		}
+	}
 	args := []string{"-T", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10"}
 	if config != "" { args = append(args, "-F", config) }
 	args = append(args, in.Host, in.Command)
