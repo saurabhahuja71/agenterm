@@ -818,6 +818,7 @@ func DefaultBuiltinsOpts(opts BuiltinOpts) *Registry {
 	r.Register(runTests{DefaultCmd: opts.TestCommand})
 	r.Register(fetchURL{}) // always on — curl/wget substitute for HTTP GET
 	r.Register(repoMap{})  // compact project tree (Grok/Cursor-style overview)
+	r.Register(sshExecute{})
 	// Shell: default on (curl, wget, bash scripts). Disable with EnableShell=false / --no-shell.
 	if opts.EnableShell {
 		r.Register(runShell{})
