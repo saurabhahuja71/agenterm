@@ -16,7 +16,7 @@ import (
 )
 
 var (
-	version = "1.0.0"
+	version      = "1.0.0"
 	flagProvider string
 	flagModel    string
 	flagBaseURL  string
@@ -81,9 +81,89 @@ func main() {
 	initCmd.Flags().BoolVar(&initForce, "force", false, "overwrite existing config with defaults")
 	root.AddCommand(initCmd)
 
+	execCmd := &cobra.Command{
+		Use:   "exec <prompt>",
+		Short: "Run one prompt headlessly with tools enabled",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return runHeadless(args[0])
+		},
+	}
+	root.AddCommand(execCmd)
+
 	if err := root.Execute(); err != nil {
 		os.Exit(1)
 	}
+}
+
+func runHeadless(prompt string) error {
+	if flagConfig != "" {
+		_ = os.Setenv("AGENTERM_CONFIG", flagConfig)
+	}
+
+	cfg, _, err := config.Load()
+	if err != nil {
+		return err
+	}
+	if flagProvider != "" {
+		cfg.Provider = flagProvider
+	}
+	if flagModel != "" {
+		cfg.Model = flagModel
+	}
+	if flagBaseURL != "" {
+		cfg.BaseURL = flagBaseURL
+		cfg.Provider = "custom"
+	}
+	if flagAPIKey != "" {
+		cfg.APIKey = flagAPIKey
+	}
+	if flagShell {
+		cfg.EnableShell = true
+	}
+	if flagNoShell {
+		cfg.EnableShell = false
+	}
+	if flagNoTools {
+		cfg.EnableTools = false
+	}
+	eff := cfg.Effective()
+	client := llm.New(eff.BaseURL, eff.APIKey)
+	reg := tools.DefaultBuiltinsOpts(tools.BuiltinOpts{
+		EnableShell: eff.EnableShell,
+		TestCommand: eff.TestCommand,
+	})
+
+	var mcpMgr *mcpclient.Manager
+	if !flagNoMCP {
+		mcpMgr = mcpclient.NewManager()
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		if err := mcpMgr.ConnectAll(ctx, eff.MCPServers); err != nil {
+			fmt.Fprintf(os.Stderr, "mcp: %v\n", err)
+		}
+		cancel()
+		mcpMgr.RegisterOnto(reg)
+		defer mcpMgr.Close()
+	}
+
+	ag := agent.New(eff, client, reg)
+	ctx := context.Background()
+	return ag.RunUserMessage(ctx, prompt, func(event agent.Event) {
+		switch event.Kind {
+		case agent.EventToken:
+			fmt.Print(event.Text)
+		case agent.EventToolStart:
+			fmt.Fprintf(os.Stderr, "\n[tool %s] %s\n", event.Tool, event.Text)
+		case agent.EventToolEnd:
+			if event.ToolOut != "" {
+				fmt.Fprintf(os.Stdout, "\n[tool %s output]\n%s\n", event.Tool, event.ToolOut)
+			}
+		case agent.EventStatus:
+			fmt.Fprintf(os.Stderr, "[%s]\n", event.Text)
+		case agent.EventError:
+			fmt.Fprintf(os.Stderr, "\n[error] %s\n", event.Text)
+		}
+	})
 }
 
 func runTUI(cmd *cobra.Command, args []string) error {
