@@ -78,23 +78,27 @@ type chatLine struct {
 }
 
 type model struct {
-	deps       Deps
-	vp         viewport.Model
-	ta         textarea.Model
-	lines      []chatLine
-	width      int
-	height     int
-	busy      bool
-	status    string
+	deps   Deps
+	vp     viewport.Model
+	ta     textarea.Model
+	lines  []chatLine
+	width  int
+	height int
+	busy   bool
+	status string
 	// stream accumulates assistant tokens. Must be a pointer: Bubble Tea
 	// copies model by value; a non-empty strings.Builder must not be copied.
-	stream    *strings.Builder
-	renderer  *glamour.TermRenderer
-	cancel    context.CancelFunc
-	events    <-chan agent.Event
-	busySince time.Time
-	gotToken  bool
-	waitSecs  int
+	stream *strings.Builder
+	// turnAssistant identifies the single assistant bubble for the active turn.
+	// Thinking, streaming, and the final answer all update this line in place;
+	// tool/error entries may be inserted around it without creating another Agent bubble.
+	turnAssistant int
+	renderer      *glamour.TermRenderer
+	cancel        context.CancelFunc
+	events        <-chan agent.Event
+	busySince     time.Time
+	gotToken      bool
+	waitSecs      int
 	// verbose shows full tool I/O and model preambles; default is quiet/compact.
 	verbose bool
 	// scrubLeft: remaining startup OSC scrub passes (color-query junk).
@@ -178,14 +182,15 @@ func New(deps Deps) model {
 	r := newGlamourRenderer(80)
 
 	m := model{
-		deps:     deps,
-		vp:       vp,
-		ta:       ta,
-		status:   "ready",
-		stream:   &strings.Builder{},
-		renderer: r,
-		verbose:   false, // compact tools by default
-		scrubLeft: 5,     // a few startup passes to catch late OSC replies
+		deps:          deps,
+		vp:            vp,
+		ta:            ta,
+		status:        "ready",
+		stream:        &strings.Builder{},
+		turnAssistant: -1,
+		renderer:      r,
+		verbose:       false, // compact tools by default
+		scrubLeft:     5,     // a few startup passes to catch late OSC replies
 		lines: []chatLine{
 			// One short banner — path lives above the prompt; tools stay in the status bar.
 			{role: "system", text: deps.Summary + " · /help"},
@@ -294,7 +299,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
 		m.height = msg.Height
-		headerH, helpH, cwdH, busyH := 1, 1, 1, 4 // busy banner reserved so layout does not jump to blank
+		headerH, helpH, cwdH, busyH := 1, 1, 1, 0
 		inputH := m.ta.Height() + 2
 		vpH := msg.Height - headerH - helpH - cwdH - busyH - inputH - 2
 		if vpH < 5 {
@@ -471,6 +476,7 @@ func (m model) handleSubmit(text string) (tea.Model, tea.Cmd) {
 	}
 	m.lines = append(m.lines, chatLine{role: "user", text: text})
 	m.ensureStream().Reset()
+	m.turnAssistant = -1
 	m.busy = true
 	m.gotToken = false
 	m.waitSecs = 0
@@ -554,7 +560,8 @@ func (m *model) showingThinkingOnly() bool {
 		return true
 	}
 	last := m.lines[len(m.lines)-1]
-	return last.role == "thinking" || (last.role == "assistant-stream" && strings.TrimSpace(last.text) == "")
+	return last.role == "thinking" || (last.role == "assistant-stream" &&
+		(strings.TrimSpace(last.text) == "" || strings.HasPrefix(strings.TrimSpace(last.text), "Thinking")))
 }
 
 // schedulePaint throttles expensive viewport rebuilds during streaming.
@@ -1012,7 +1019,7 @@ func (m model) handleModelCmd(parts []string) (model, tea.Cmd) {
 		m.status = "pick model · Tab next · Enter select · Esc cancel"
 		m.lines = append(m.lines, chatLine{
 			role: "system",
-			text:  fmt.Sprintf("Select a model (%d available)\n  Tab / ↓  next ·  Shift+Tab / ↑  prev ·  Enter  select ·  Esc  cancel\n  Or type: /model <name>", len(ids)),
+			text: fmt.Sprintf("Select a model (%d available)\n  Tab / ↓  next ·  Shift+Tab / ↑  prev ·  Enter  select ·  Esc  cancel\n  Or type: /model <name>", len(ids)),
 		})
 		m.refreshViewport()
 		return m, nil
@@ -1163,28 +1170,31 @@ func (m model) modelPickerView(width int) string {
 }
 
 func (m *model) upsertStreamingAssistant(content string) {
-	if len(m.lines) > 0 && m.lines[len(m.lines)-1].role == "assistant-stream" {
-		m.lines[len(m.lines)-1].text = content
+	if m.validTurnAssistant() {
+		m.lines[m.turnAssistant].role = "assistant-stream"
+		m.lines[m.turnAssistant].text = content
 		return
 	}
 	m.lines = append(m.lines, chatLine{role: "assistant-stream", text: content})
+	m.turnAssistant = len(m.lines) - 1
 }
 
 func (m *model) flushStreamAsLine() {
 	sb := m.ensureStream()
 	if sb.Len() == 0 {
-		if len(m.lines) > 0 && m.lines[len(m.lines)-1].role == "assistant-stream" {
-			m.lines[len(m.lines)-1].role = "assistant"
+		if m.validTurnAssistant() && m.lines[m.turnAssistant].role == "assistant-stream" {
+			m.lines[m.turnAssistant].role = "assistant"
 		}
 		return
 	}
 	content := sb.String()
 	sb.Reset()
-	if len(m.lines) > 0 && m.lines[len(m.lines)-1].role == "assistant-stream" {
-		m.lines[len(m.lines)-1] = chatLine{role: "assistant", text: content}
+	if m.validTurnAssistant() {
+		m.lines[m.turnAssistant] = chatLine{role: "assistant", text: content}
 		return
 	}
 	m.lines = append(m.lines, chatLine{role: "assistant", text: content})
+	m.turnAssistant = len(m.lines) - 1
 }
 
 // flushStreamAsLineQuiet drops tool-JSON / empty stream; keeps real answers.
@@ -1192,8 +1202,8 @@ func (m *model) flushStreamAsLineQuiet() {
 	sb := m.ensureStream()
 	content := strings.TrimSpace(sb.String())
 	sb.Reset()
-	m.dropStreamingAssistant()
 	if content == "" {
+		m.dropStreamingAssistant()
 		return
 	}
 	if isMostlyToolNoise(content) {
@@ -1201,10 +1211,16 @@ func (m *model) flushStreamAsLineQuiet() {
 		if cleaned := stripLeadingToolNoise(content); cleaned != "" && !isMostlyToolNoise(cleaned) {
 			content = cleaned
 		} else {
+			m.dropStreamingAssistant()
 			return
 		}
 	}
+	if m.validTurnAssistant() {
+		m.lines[m.turnAssistant] = chatLine{role: "assistant", text: content}
+		return
+	}
 	m.lines = append(m.lines, chatLine{role: "assistant", text: content})
+	m.turnAssistant = len(m.lines) - 1
 }
 
 // stripLeadingToolNoise removes a leading JSON/tool dump if prose remains after it.
@@ -1243,9 +1259,14 @@ func stripLeadingToolNoise(s string) string {
 }
 
 func (m *model) dropStreamingAssistant() {
-	if len(m.lines) > 0 && m.lines[len(m.lines)-1].role == "assistant-stream" {
-		m.lines = m.lines[:len(m.lines)-1]
+	if m.validTurnAssistant() && m.lines[m.turnAssistant].role == "assistant-stream" {
+		m.lines = append(m.lines[:m.turnAssistant], m.lines[m.turnAssistant+1:]...)
+		m.turnAssistant = -1
 	}
+}
+
+func (m *model) validTurnAssistant() bool {
+	return m.turnAssistant >= 0 && m.turnAssistant < len(m.lines)
 }
 
 // upsertThinkingPlaceholder keeps a blinking "Thinking…" line in the chat while busy
@@ -1255,22 +1276,21 @@ func (m *model) upsertThinkingPlaceholder() {
 		return
 	}
 	// Real non-empty assistant stream already visible — no placeholder.
-	if len(m.lines) > 0 {
-		last := m.lines[len(m.lines)-1]
-		if (last.role == "assistant-stream" || last.role == "assistant") && strings.TrimSpace(last.text) != "" {
+	if m.validTurnAssistant() {
+		last := m.lines[m.turnAssistant]
+		if (last.role == "assistant-stream" || last.role == "assistant") &&
+			strings.TrimSpace(last.text) != "" && !strings.HasPrefix(strings.TrimSpace(last.text), "Thinking") {
 			return
-		}
-		// Drop empty assistant bubbles that hide Thinking.
-		if (last.role == "assistant-stream" || last.role == "assistant") && strings.TrimSpace(last.text) == "" {
-			m.lines = m.lines[:len(m.lines)-1]
 		}
 	}
 	text := m.busyBannerText()
-	if len(m.lines) > 0 && m.lines[len(m.lines)-1].role == "thinking" {
-		m.lines[len(m.lines)-1].text = text
+	if m.validTurnAssistant() {
+		m.lines[m.turnAssistant].role = "assistant-stream"
+		m.lines[m.turnAssistant].text = text
 		return
 	}
-	m.lines = append(m.lines, chatLine{role: "thinking", text: text})
+	m.lines = append(m.lines, chatLine{role: "assistant-stream", text: text})
+	m.turnAssistant = len(m.lines) - 1
 }
 
 func (m model) busyBannerText() string {
@@ -1727,22 +1747,12 @@ func (m model) View() string {
 		help = styleHelp.Render("Tab / ↓ next · Shift+Tab / ↑ prev · Enter select · Esc cancel · 1-9 quick")
 	}
 	body := styleBox.Width(max(10, w-2)).Render(m.vp.View())
-	// Always paint busy banner above the prompt (independent of chat lines).
-	busyBar := ""
-	if m.busy {
-		busyBar = styleBox.Width(max(10, w-2)).
-			BorderForeground(colorAccent).
-			Render(styleAsst.Render("Agent") + "\n" + styleStatus.Render(m.busyBannerText()))
-	}
 	// Always show workspace path above the prompt so you know where tools write.
 	cwdLine := styleHelp.Render("cwd  " + displayCwd(max(20, w-8)))
 	input := styleBox.Width(max(10, w-2)).Render(m.ta.View())
 	if m.modelPick != nil {
 		pick := m.modelPickerView(w)
 		return lipgloss.JoinVertical(lipgloss.Left, header, body, pick, cwdLine, help)
-	}
-	if busyBar != "" {
-		return lipgloss.JoinVertical(lipgloss.Left, header, body, busyBar, cwdLine, input, help)
 	}
 	return lipgloss.JoinVertical(lipgloss.Left, header, body, cwdLine, input, help)
 }
