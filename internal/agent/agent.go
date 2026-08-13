@@ -225,12 +225,12 @@ func (a *Agent) RunUserMessage(ctx context.Context, user string, emit func(Event
 		msgs := a.History
 		if toolsUsed > 0 {
 			msgs = append(append([]llm.Message{}, a.History...), llm.Message{
-				Role:    llm.RoleSystem,
+				Role:    llm.RoleUser,
 				Content: afterToolsAnswerHint(user, toolsUsed),
 			})
 		} else if isActionRequest(user) && round == 0 {
 			msgs = append(append([]llm.Message{}, a.History...), llm.Message{
-				Role: llm.RoleSystem,
+				Role: llm.RoleUser,
 				Content: `The user wants real on-disk changes. Call tools now:
 1) read_file if needed, 2) str_replace or write_file, 3) git add/commit/push only if they asked.
 Do not answer with only a markdown plan or shell snippets.`,
